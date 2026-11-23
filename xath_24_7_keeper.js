@@ -105,6 +105,7 @@ let totalPacketsSent = 0;
 let startTime = Date.now();
 let currentActiveId = 'connecting...';
 let currentActiveRegname = REGNAME || '';
+let hasUnstealthed = false;
 const seenUsers = new Map();
 const urlCache = {};
 
@@ -343,6 +344,8 @@ async function startKeeper() {
 
     const storage = {
         'todo': JSON.stringify(todoObject),
+        'Macros': JSON.stringify({ Stealth: 'disable' }),
+        'Settings': JSON.stringify({ Stealth: 'disable' }),
         'w_Powers': '{}'
     };
 
@@ -455,8 +458,13 @@ async function startKeeper() {
                     }
 
                     // Welcome message / joined
-                    if (str.includes('<done') || str.includes('<i ')) {
-                        if (GREETING_MSG && !str.includes('_GREETED')) {
+                    if ((str.includes('<done') || str.includes('<i ')) && !hasUnstealthed) {
+                        hasUnstealthed = true;
+                        // Explicitly disable invisible power so the bot is visible in the room
+                        activeWs.send(Buffer.from('<m t="/u" u="0" />\0'));
+                        console.log('[VISIBILITY] Disabled invisible mode (/u sent). User is now visible in the room.');
+
+                        if (GREETING_MSG) {
                             setTimeout(() => {
                                 sendRoomMessage(GREETING_MSG);
                             }, 1200);
@@ -491,6 +499,8 @@ async function startKeeper() {
                     if (BOT_AVATAR) {
                         pkt = pkt.replace(/a="[^"]*"/, `a="${BOT_AVATAR}"`);
                     }
+                    // Strip invisible flag (bit 6 = 64) from auth packet
+                    pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${parseInt(fVal, 10) & ~64}"`);
                     console.log(`[AUTH J2]: User ${activeId} (${REGNAME || BOT_NICK}) authenticating...`);
                 }
                 if (activeWs && activeWs.readyState === WebSocket.OPEN) {
@@ -569,10 +579,11 @@ async function startKeeper() {
             }
         }, 60);
 
-        // Stealth Ping Keepalive (every 25 seconds)
+        // Keepalive Ping (every 25 seconds)
         pingTimer = setInterval(() => {
             if (activeWs && activeWs.readyState === WebSocket.OPEN) {
-                activeWs.send(Buffer.from('<m t="/s" u="0" />\0'));
+                try { activeWs.ping(); } catch (_) {}
+                activeWs.send(Buffer.from('<c u="1" t="/KEEPALIVE" />\0'));
                 totalPacketsSent++;
             }
         }, 25000);
@@ -593,6 +604,7 @@ function cleanupAndReconnect(delayMs = 3000) {
     if (isReconnecting) return;
     isReconnecting = true;
     isConnected = false;
+    hasUnstealthed = false;
     reconnectAttempts++;
 
     console.log(`[RECONNECT] Resetting session. Reconnecting in ${(delayMs / 1000).toFixed(1)}s (Attempt #${reconnectAttempts})...`);
