@@ -674,7 +674,7 @@ const srv = http.createServer((req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-    if (url.pathname === '/user-active' || url.pathname === '/api/sync-session') {
+    if (url.pathname === '/api/sync-session') {
         let body = '';
         req.on('data', chunk => { body += chunk; });
         req.on('end', () => {
@@ -716,11 +716,24 @@ const srv = http.createServer((req, res) => {
                 if (!joined && !isStandby) {
                     scheduleReconnect();
                 }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ status: 'synced', ok: true }));
             }
 
-            enterStandbyMode(receivedTodo ? 'PC böngésző aktív (Session szinkronizálva)' : 'PC / böngésző heartbeat érkezett');
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ status: 'error', message: 'No todo provided' }));
+        });
+        return;
+    }
+
+    if (url.pathname === '/user-active') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            enterStandbyMode('PC böngésző aktív a csevegőben');
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: true, synced: !!receivedTodo }));
+            return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: isStandby }));
         });
         return;
     }

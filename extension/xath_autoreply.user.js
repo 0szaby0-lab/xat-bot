@@ -340,20 +340,30 @@
     // és amikor bezárod a lapot/böngészőt, a Render automatikusan visszatér 24/7 módba!
     const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
 
+    function syncKeeperSession() {
+        try {
+            const rawTodo = localStorage.getItem('todo');
+            if (!rawTodo) return;
+            const todoData = JSON.parse(rawTodo);
+            if (!todoData || !todoData.PassHash || String(todoData.w_userno || '') !== '2000000') return;
+
+            fetch(`${KEEPER_URL}/api/sync-session`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user: 'Szaby', todo: todoData })
+            }).catch(() => {});
+        } catch (_) {}
+    }
+
     function sendKeeperHeartbeat() {
         if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
             return;
         }
         try {
-            const rawTodo = localStorage.getItem('todo');
-            let todoData = null;
-            if (rawTodo) {
-                try { todoData = JSON.parse(rawTodo); } catch (_) {}
-            }
             fetch(`${KEEPER_URL}/user-active?user=Szaby`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user: 'Szaby', todo: todoData })
+                body: JSON.stringify({ user: 'Szaby' })
             }).catch(() => {});
         } catch (_) {}
     }
@@ -367,6 +377,9 @@
             }
         } catch (_) {}
     }
+
+    // Oldal betöltésekor automatikusan szinkronizáljuk a munkamenet kulcsokat
+    setTimeout(syncKeeperSession, 1500);
 
     // 25 másodpercenként küldünk állapotot, HA nyitva van a chat websocket
     setInterval(sendKeeperHeartbeat, 25000);
