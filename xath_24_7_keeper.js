@@ -142,6 +142,22 @@ try {
     urlCache = JSON.parse(fs.readFileSync(path.join(__dirname, 'xath_url_cache.json'), 'utf8'));
 } catch (_) {}
 
+let pingTimer = null;
+let hasGreeted = false;
+let reconnectTimer = null;
+
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!activeWs || activeWs.readyState === WebSocket.CLOSED) {
+            addLog('[AUTO-RECONNECT] Re-entering room...');
+            SendC('leaveBackground', '', roomName);
+        }
+    }, 4000);
+}
+
 let activeWs = null;
 let joined = false;
 let myServerId = botId;
@@ -235,6 +251,10 @@ function handleJson(raw) {
 
             activeWs.on('open', () => {
                 addLog('[WS OPEN] Connected to wss.xath.hu!');
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
                 SendC('xatMessageReceived', '#CONNECT_OK', '');
                 const hostB64 = Buffer.from('xat.com').toString('base64');
                 SendC('xatMessageOK', '#CONNECT_CHECK', hostB64);
@@ -260,25 +280,31 @@ function handleJson(raw) {
                     joined = true;
                     addLog(`[ONLINE 24/7] ${botNick} (${myServerId}) joined ${roomName} successfully!`);
 
-                    setInterval(() => {
-                        sendPacket('<m t="/s" u="0" />');
-                    }, 25000);
+                    if (!pingTimer) {
+                        pingTimer = setInterval(() => {
+                            sendPacket('<m t="/s" u="0" />');
+                        }, 25000);
+                    }
 
                     setTimeout(() => {
                         sendPacket(`<x i="418" n="${botNick}" a="${botAvatar}" />`);
                     }, 500);
 
-                    setTimeout(() => {
-                        addLog('[VISIBILITY] Breaking invisible mode via normal greeting in main room...');
-                        SendC('xatCommand', '', JSON.stringify({
-                            Type: 'Send',
-                            Command: 'Send',
-                            Page: 'messages',
-                            Message: initialMsg,
-                            msgId: Math.random().toString(36).substr(2, 9)
-                        }));
-                    }, 1500);
+                    if (initialMsg && !hasGreeted) {
+                        hasGreeted = true;
+                        setTimeout(() => {
+                            addLog('[VISIBILITY] Sending initial greeting...');
+                            SendC('xatCommand', '', JSON.stringify({
+                                Type: 'Send',
+                                Command: 'Send',
+                                Page: 'messages',
+                                Message: initialMsg,
+                                msgId: Math.random().toString(36).substr(2, 9)
+                            }));
+                        }, 4000);
+                    }
                 }
+
 
                 if (str.includes('<v ')) {
                     const vMatch = str.match(/<v ([^>]+)>/);
@@ -316,11 +342,9 @@ function handleJson(raw) {
                 addLog(`[WS CLOSED] Code: ${code}, Reason: ${reason || ''}`);
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
-                setTimeout(() => {
-                    addLog('[AUTO-RECONNECT] Re-entering room...');
-                    SendC('leaveBackground', '', roomName);
-                }, 3000);
+                scheduleReconnect();
             });
+
 
             activeWs.onerror = (err) => {
                 addLog(`[WS ERROR] ${err.message}`);
