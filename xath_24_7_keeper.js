@@ -172,18 +172,51 @@ function sendPrivateBoth(senderId, nick) {
     addLog(`[PRIVÁT KÜLDÉS] Privát csevegő fül ÉS közös chat lakat küldése ${nick} (${senderId}) részére...`);
     userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-    // 1. Privát csevegő fül (PC tab) megnyitása
+    const msgId = Math.random().toString(36).substr(2, 9);
+    const opts = Buffer.from(JSON.stringify({
+        isTranslated: "",
+        msgId: msgId,
+        type: "msg"
+    })).toString('base64');
+
+    // 1. WASM native PrivateChat init (nyitja a privát csevegő fül munkamenetet a WASM-ban)
+    try {
+        SendC('xatCommand', '', JSON.stringify({
+            Command: 'Action',
+            Next: 'messages',
+            Page: 'actions',
+            Type: 'Action',
+            UserNo: parseInt(senderId, 10),
+            name: 'PrivateChat'
+        }));
+    } catch (_) {}
+
+    // 2. Privát csevegő fül (PC tab) megnyitása & tickle jelzés
     sendPacket(`<z d="${senderId}" t="/" />`);
+    sendPacket(`<z d="${senderId}" t="/l" />`);
 
     setTimeout(() => {
-        // 2. Üzenet a privát csevegő fülbe
-        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
+        // 3. Üzenet a privát csevegő fülbe (HTML5 kliens elvárja a base64 o opts-ot, a sender u-t és az s="2"-t)
+        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<z d="${senderId}" u="${botId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<p u="${senderId}" d="${senderId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
 
-        // 3. Üzenet a közös chatfolyamba lakat ikonnal (<priv>)
+        // 4. WASM közvetlen küldés a megnyitott privát fülbe
+        try {
+            SendC('xatCommand', '', JSON.stringify({
+                Type: 'Send',
+                Command: 'Send',
+                Page: 'messages',
+                Message: PM_REPLY_TEXT,
+                msgId: msgId
+            }));
+        } catch (_) {}
+
+        // 5. Üzenet a közös chatfolyamba lakat ikonnal (<priv>)
         sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
 
-        // 4. WASM native PrivateMessage dispatch (közös chat <priv>)
+        // 6. WASM native PrivateMessage dispatch (közös chat lakat <priv>)
         try {
             SendC('xatCommand', '', JSON.stringify({
                 Command: 'Action',
@@ -195,7 +228,7 @@ function sendPrivateBoth(senderId, nick) {
                 name: 'PrivateMessage'
             }));
         } catch (_) {}
-    }, 200);
+    }, 150);
 }
 
 // TIER 3 (Fallback): Fő chaten nyilvánosan ahol mindenki látja (ha a privát le van zárva)
