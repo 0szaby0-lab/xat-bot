@@ -420,6 +420,10 @@ function handleJson(raw) {
         }
         // 4 = CONNECT
         else if (type === 4) {
+            if (isStandby) {
+                addLog('[WS CONNECT BLOCKED] Standby aktív (felhasználó PC-n/másik eszközön van), kapcsolat blokkolva.');
+                return;
+            }
             if (activeWs) {
                 try { activeWs.close(); } catch (_) {}
             }
@@ -622,13 +626,14 @@ function handleJson(raw) {
             });
 
             activeWs.on('close', (code, reason) => {
-                addLog(`[WS CLOSED] Code: ${code}, Reason: ${reason || ''}`);
+                const reasonStr = reason ? reason.toString('utf8') : '';
+                addLog(`[WS CLOSED] Code: ${code}, Reason: ${reasonStr}`);
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
 
                 // Ha a bezárás duplicate vagy kick jellegű kód (1000, 1008, 4000) és nincs még standby
-                if (code === 1008 || code === 4000 || (reason && reason.toLowerCase().includes('dup'))) {
-                    enterStandbyMode(`Zárási kód: ${code} (${reason || 'duplicate'})`);
+                if (code === 1008 || code === 4000 || reasonStr.toLowerCase().includes('dup')) {
+                    enterStandbyMode(`Zárási kód: ${code} (${reasonStr || 'duplicate'})`);
                 } else {
                     scheduleReconnect();
                 }
