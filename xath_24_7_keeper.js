@@ -118,14 +118,29 @@ function addLog(msg) {
     console.log(msg);
 }
 
+function sendPacket(pkt) {
+    if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return false;
+    let dataToSend = pkt;
+    if (typeof dataToSend === 'string') {
+        if (!dataToSend.endsWith('\0')) dataToSend += '\0';
+        activeWs.send(Buffer.from(dataToSend, 'utf8'));
+    } else {
+        if (dataToSend[dataToSend.length - 1] !== 0) {
+            dataToSend = Buffer.concat([dataToSend, Buffer.from([0])]);
+        }
+        activeWs.send(dataToSend);
+    }
+    totalPacketsSent++;
+    return true;
+}
+
 function sendRoomMessage(text) {
     if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
         addLog(`[KÜLDÉS SIKERTELEN] WebSocket nincs nyitva (állapot: ${activeWs ? activeWs.readyState : 'null'})`);
         return false;
     }
     // 1. Plain message packet (accepted by classic xat clients and servers)
-    const purePkt = `<m t="${text.replace(/"/g, '&quot;')}" u="${currentActiveId}" />\0`;
-    activeWs.send(Buffer.from(purePkt));
+    sendPacket(`<m t="${text.replace(/"/g, '&quot;')}" u="${currentActiveId}" />`);
 
     // 2. Full options packet (accepted by new web/mobile clients)
     const msgOpts = Buffer.from(JSON.stringify({
@@ -133,10 +148,8 @@ function sendRoomMessage(text) {
         msgId: Math.random().toString(36).substr(2, 9),
         type: "msg"
     })).toString('base64');
-    const fullPkt = `<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
-    activeWs.send(Buffer.from(fullPkt));
+    sendPacket(`<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />`);
 
-    totalPacketsSent += 2;
     addLog(`[ÜZENET KIKÜLDVE] [${BOT_NICK}]: "${text}"`);
     return true;
 }
@@ -147,8 +160,7 @@ function sendRawCommand(cmd) {
         return false;
     }
     // 1. Send pure command packet
-    const purePkt = `<m t="${cmd.replace(/"/g, '&quot;')}" u="${currentActiveId}" />\0`;
-    activeWs.send(Buffer.from(purePkt));
+    sendPacket(`<m t="${cmd.replace(/"/g, '&quot;')}" u="${currentActiveId}" />`);
 
     // 2. Also send wrapped message packet for full client compatibility
     const msgOpts = Buffer.from(JSON.stringify({
@@ -156,16 +168,18 @@ function sendRawCommand(cmd) {
         msgId: Math.random().toString(36).substr(2, 9),
         type: "msg"
     })).toString('base64');
-    const fullPkt = `<m t="${cmd.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
-    activeWs.send(Buffer.from(fullPkt));
+    sendPacket(`<m t="${cmd.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />`);
 
-    totalPacketsSent += 2;
     addLog(`[PARANCS KIKÜLDVE]: "${cmd}"`);
     return true;
 }
 
 function disableInvisibleMode() {
-    addLog(`[LÁTHATÓSÁG] Láthatósági állapot ellenőrizve (${TARGET_ROOM}): Invisible kikapcsolva (w_d0=0).`);
+    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolási parancsok küldése: /-invisible és /u...`);
+    sendRawCommand('/-invisible');
+    setTimeout(() => {
+        sendRawCommand('/u');
+    }, 1200);
     return true;
 }
 
@@ -611,14 +625,19 @@ async function startKeeper() {
         w_registered: activeRegname,
         DeviceId: activeDeviceId,
         PassHash: activePassHash,
+        w_cb: '0',
         MobNo: ''
     };
+
+    const powersStr = "2147483647|2147483647|4294836223|4294967295|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2080374783|2112880639|1608499199|1069547519|2130702079|2147483647|1802502011|796917759|2130706431|2097146|0";
+    const powersObj = {};
+    powersStr.split("|").forEach((p, i) => { powersObj[i] = parseInt(p, 10); });
 
     const storage = {
         'todo': JSON.stringify(todoObject),
         'Macros': JSON.stringify({ Stealth: 'disable' }),
         'Settings': JSON.stringify({ Stealth: 'disable' }),
-        'w_Powers': '{}'
+        'w_Powers': JSON.stringify(powersObj)
     };
 
     global.localStorage = {
@@ -735,12 +754,14 @@ async function startKeeper() {
                     if (str.includes('<done') && !hasUnstealthed) {
                         hasUnstealthed = true;
                         addLog(`[SZOBÁBAN] Sikeresen csatlakozva a szobához (${TARGET_ROOM})!`);
-                        disableInvisibleMode();
+                        setTimeout(() => {
+                            disableInvisibleMode();
+                        }, 2000);
 
                         if (GREETING_MSG) {
                             setTimeout(() => {
                                 sendRoomMessage(GREETING_MSG);
-                            }, 3000);
+                            }, 4500);
                         }
                     }
 
@@ -788,10 +809,7 @@ async function startKeeper() {
                     }
                     addLog(`[AUTH J2 KÜLDVE]: ${pkt.replace(/\0/g, ' ')}`);
                 }
-                if (activeWs && activeWs.readyState === WebSocket.OPEN) {
-                    totalPacketsSent++;
-                    activeWs.send(Buffer.from(pkt));
-                }
+                sendPacket(pkt);
             }
         } catch (e) {
             console.error('[HANDLE_JSON ERR]:', e.message);
