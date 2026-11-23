@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xath.hu Auto-Reply on Profile Click
 // @namespace    https://xath.hu/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Automatikus privát üzenet küldése azonnal profilkattintásra és automatikus 24/7 Render szinkronizáció
 // @match        *://xath.hu/*
 // @match        *://*.xath.hu/*
@@ -12,21 +12,32 @@
 
     'use strict';
 
-    // Betöltjük a mentett beállításokat vagy alapértelmezetteket
     const STORE_KEY = 'xath_autoreply_cfg';
+    let savedCfg = {};
+    try { savedCfg = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (_) {}
     const config = Object.assign({
         enabled: true,
         replyText: "Hey there! Thanks for reaching out, enjoy the music! :)",
         fallbackText: "Hey! Your private messages are locked, but welcome and enjoy the music! (cool)",
-        debounceMs: 5000
-    }, JSON.parse(localStorage.getItem(STORE_KEY) || '{}'));
+        debounceMs: 4000
+    }, savedCfg);
+
+    // Ha nincs még kifejezetten beállítva, alapértelmezetten MINDIG BE van kapcsolva
+    if (config.enabled === undefined) config.enabled = true;
 
     function saveConfig() {
         localStorage.setItem(STORE_KEY, JSON.stringify(config));
     }
 
     let activeSocket = null;
-    let myUserId = null;
+    let myUserId = '2000000';
+    try {
+        const rawTodo = localStorage.getItem('todo');
+        if (rawTodo) {
+            const t = JSON.parse(rawTodo);
+            if (t.w_userno) myUserId = String(t.w_userno);
+        }
+    } catch (_) {}
     let lastTargetId = '';
     let lastTargetNick = '';
     const lastInteraction = new Map();
@@ -150,15 +161,16 @@
                 const text = tMatch ? tMatch[1] : '';
                 let senderId = uMatch ? uMatch[1] : null;
 
-                const myId = myUserId || (window.config && String(window.config.MyId));
-                if (!senderId && dMatch && dMatch[1] !== myId) {
+                const myId = myUserId || (window.config && String(window.config.MyId)) || '2000000';
+                if (!senderId && dMatch && dMatch[1] !== myId && dMatch[1] !== '2000000') {
                     senderId = dMatch[1];
                 }
-                const isForMe = !dMatch || dMatch[1] === myId;
+                const isForMe = !dMatch || dMatch[1] === myId || dMatch[1] === '2000000';
 
-                if (isForMe && senderId && senderId !== myId && senderId !== '0' && senderId !== '1') {
+                if (isForMe && senderId && senderId !== myId && senderId !== '2000000' && senderId !== '0' && senderId !== '1') {
                     const isClick = pkt.includes('t="/l"');
                     const isPCTab = pkt.includes('s="2"') || (pkt.startsWith('<z ') && !isClick);
+                    console.log('[AUTO-REPLY INTERACTION DETECTED] Sender:', senderId, 'isClick:', isClick, 'isPCTab:', isPCTab, 'text:', text);
                     handleUserInteraction(ws, senderId, text, isClick, isPCTab);
                 }
             }
