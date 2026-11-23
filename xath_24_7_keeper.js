@@ -106,8 +106,11 @@ let startTime = Date.now();
 let currentActiveId = 'connecting...';
 let currentActiveRegname = REGNAME || '';
 let hasUnstealthed = false;
-const seenUsers = new Map();
-const urlCache = {};
+let urlCache = {};
+try {
+    urlCache = JSON.parse(fs.readFileSync(path.join(__dirname, 'xath_url_cache.json'), 'utf8'));
+} catch (_) {}
+
 
 // --- Activity Logs & Global Message / Command Dispatchers ---
 const recentLogs = [];
@@ -719,12 +722,22 @@ async function startKeeper() {
 
             // Type 1: HTTP API Fetch
             if (type === 1) {
+                if (urlCache[cmd]) {
+                    SendC('xatURL', cmd, urlCache[cmd]);
+                    return;
+                }
                 const targetUrl = cmd.replace('https://xat.com', 'https://xath.hu');
                 if (urlCache[targetUrl]) {
                     SendC('xatURL', cmd, urlCache[targetUrl]);
                     return;
                 }
+                let httpAgent = null;
+                if (PROXY_URL) {
+                    if (PROXY_URL.startsWith('socks')) httpAgent = new SocksProxyAgent(PROXY_URL);
+                    else httpAgent = new HttpsProxyAgent(PROXY_URL);
+                }
                 https.get(targetUrl, {
+                    agent: httpAgent,
                     headers: { 'User-Agent': USER_AGENT, 'Origin': 'https://xath.hu', 'Referer': `https://xath.hu/${TARGET_ROOM}` }
                 }, (res) => {
                     let body = '';
@@ -735,6 +748,7 @@ async function startKeeper() {
                     });
                 }).on('error', () => {});
             }
+
             // Type 4: Establish WebSocket
             else if (type === 4) {
                 if (activeWs) {
