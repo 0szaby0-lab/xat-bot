@@ -103,6 +103,8 @@ let lastConnectedTime = null;
 let totalPacketsReceived = 0;
 let totalPacketsSent = 0;
 let startTime = Date.now();
+let currentActiveId = 'connecting...';
+let currentActiveRegname = REGNAME || '';
 const seenUsers = new Map();
 const urlCache = {};
 
@@ -115,7 +117,8 @@ const server = http.createServer((req, res) => {
             uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
             room: TARGET_ROOM,
             bot: BOT_NICK,
-            userId: USER_ID,
+            userId: currentActiveId,
+            registeredName: currentActiveRegname,
             reconnects: reconnectAttempts
         }));
     }
@@ -147,8 +150,8 @@ const server = http.createServer((req, res) => {
         <table>
             <tr><td>Target Room</td><td><a href="https://xath.hu/${TARGET_ROOM}" target="_blank" style="color:#58a6ff;">https://xath.hu/${TARGET_ROOM}</a></td></tr>
             <tr><td>Nickname</td><td><b>${BOT_NICK}</b></td></tr>
-            <tr><td>Registered Name</td><td>${REGNAME || '<i>None</i>'}</td></tr>
-            <tr><td>User ID</td><td><code>${USER_ID}</code></td></tr>
+            <tr><td>Registered Name</td><td>${currentActiveRegname || '<i>None</i>'}</td></tr>
+            <tr><td>User ID</td><td><code>${currentActiveId}</code></td></tr>
             <tr><td>Uptime</td><td>${uptimeHrs} hours</td></tr>
             <tr><td>Last Connected</td><td>${lastConnectedTime ? new Date(lastConnectedTime).toLocaleTimeString() : 'Connecting...'}</td></tr>
             <tr><td>Total Reconnects</td><td>${reconnectAttempts}</td></tr>
@@ -301,18 +304,24 @@ async function startKeeper() {
         }
     }
 
-    // 2. Fallback to guest credentials if still unauthenticated
-    if (!activeId || activeId === 'auto' || !activeK1) {
-        console.log('[AUTH] No static registered credentials supplied, obtaining fresh guest credentials...');
+    // 2. Fetch fresh session keys (k1, k2) or guest credentials
+    if (!activeK1 || !activeId || activeId === 'auto') {
         const creds = await fetchGuestCredentials(PROXY_URL);
         if (!creds) {
-            console.error('[AUTH FAIL] Unable to fetch credentials. Retrying in 5 seconds...');
+            console.error('[AUTH FAIL] Unable to fetch session credentials. Retrying in 5 seconds...');
             return cleanupAndReconnect(5000);
         }
-        activeId = creds.id;
+        if (!activeId || activeId === 'auto') {
+            activeId = creds.id;
+        }
         activeK1 = creds.k1;
         activeK2 = creds.k2;
-        console.log(`[AUTH] Successfully obtained dynamic ID: ${activeId}`);
+        currentActiveId = activeId;
+        currentActiveRegname = activeRegname;
+        console.log(`[AUTH] Session keys established. User ID: ${activeId} (${activeRegname || 'Guest'})`);
+    } else {
+        currentActiveId = activeId;
+        currentActiveRegname = activeRegname;
     }
 
     // Build the exact 'todo' storage structure matching browser
