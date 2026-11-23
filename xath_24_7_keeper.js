@@ -251,15 +251,23 @@ function sendTier1PCTab(senderId, nick) {
     addLog(`[TIER 1 - PRIVÁT CSEVEGŐ FÜL] Privát csevegő fül nyitása és küldés ${nick} (${senderId}) részére...`);
     userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-    // 1. WASM native PrivateChat init (nyitja a privát csevegő fül munkamenetet a WASM-ban)
+    const msgId = Math.random().toString(36).substr(2, 9);
+    const opts = Buffer.from(JSON.stringify({
+        isTranslated: "",
+        msgId: msgId,
+        type: "msg"
+    })).toString('base64');
+
+    // 1. WASM native PrivateMessage dispatch
     try {
         SendC('xatCommand', '', JSON.stringify({
             Command: 'Action',
+            Message: PM_REPLY_TEXT,
             Next: 'messages',
             Page: 'actions',
             Type: 'Action',
             UserNo: parseInt(senderId, 10),
-            name: 'PrivateChat'
+            name: 'PrivateMessage'
         }));
     } catch (_) {}
 
@@ -267,9 +275,11 @@ function sendTier1PCTab(senderId, nick) {
     sendPacket(`<z d="${senderId}" t="/" />`);
 
     setTimeout(() => {
-        // 3. Szabályos xat privát üzenet küldés a fülbe (s="2")
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
-    }, 150);
+        // 3. Szabályos xat privát csevegő üzenet küldése a fülbe valódi <z> csomagokkal
+        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<z d="${senderId}" u="${botId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
+    }, 120);
 }
 
 // TIER 2 (FALLBACK 1): Fő chaten lakatban (<priv>) ha a privát csevegő fül zárolva van
@@ -352,15 +362,6 @@ function handleUserInteraction(senderId, text, isClick, isPCTab) {
 
     // FŐ ÁG (Tier 1): Privát csevegő fülbe küldés
     sendTier1PCTab(senderId, targetNick);
-
-    // GARANTÁLT VÁLASZ: Ha 1.5 másodpercig nem igazolódik vissza a privát fül, menjen lakatban és a fő chaten
-    setTimeout(() => {
-        const state = userDeliveryState.get(senderId);
-        if (state && state.tier === 1) {
-            addLog(`[GARANTÁLT FALLBACK] ${targetNick} (${senderId}) részére lakat és nyilvános megerősítés...`);
-            sendTier2MainPadlock(senderId, targetNick);
-        }
-    }, 1500);
 }
 
 let activeWs = null;

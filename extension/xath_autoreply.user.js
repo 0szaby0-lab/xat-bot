@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xath.hu Auto-Reply on Profile Click
 // @namespace    https://xath.hu/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit
 // @match        *://xath.hu/*
 // @match        *://*.xath.hu/*
@@ -24,10 +24,10 @@
         debounceMs: 3000
     }, savedCfg);
 
-    // Kényszerített bekapcsolás és v1.3 frissítés
-    if (localStorage.getItem('xath_ar_v13') !== '1') {
+    // Kényszerített bekapcsolás és v1.4 frissítés
+    if (localStorage.getItem('xath_ar_v14') !== '1') {
         config.enabled = true;
-        localStorage.setItem('xath_ar_v13', '1');
+        localStorage.setItem('xath_ar_v14', '1');
         try { localStorage.setItem(STORE_KEY, JSON.stringify(config)); } catch (_) {}
     }
 
@@ -36,7 +36,15 @@
     }
 
     let activeSocket = null;
-    let currentTabUserId = null;
+    let currentTabUserId = TARGET_USER_ID;
+    try {
+        const rawTodo = localStorage.getItem('todo');
+        if (rawTodo) {
+            const t = JSON.parse(rawTodo);
+            if (t.w_userno) currentTabUserId = String(t.w_userno);
+        }
+    } catch (_) {}
+
     let lastTargetId = '';
     let lastTargetNick = '';
     const lastInteraction = new Map();
@@ -50,14 +58,22 @@
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
+        const myId = TARGET_USER_ID;
+        const msgId = Math.random().toString(36).substr(2, 9);
+        const opts = (typeof btoa !== 'undefined')
+            ? btoa(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" }))
+            : Buffer.from(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" })).toString('base64');
+
         // 1. Privát csevegő fül megnyitása a célfelhasználó felé
         ws.send(`<z d="${senderId}" t="/" />\0`);
 
-        // 2. Üzenet elküldése a privát csevegő fülbe (s="2")
+        // 2. Üzenet elküldése valódi <z> privát csevegő csomagokkal a fülbe
         setTimeout(() => {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            ws.send(`<p u="${senderId}" t="${config.replyText}" s="2" />\0`);
-        }, 150);
+            ws.send(`<z d="${senderId}" u="${myId}_0" t="${config.replyText}" o="${opts}" s="2" />\0`);
+            ws.send(`<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
+            ws.send(`<z d="${senderId}" t="${config.replyText}" />\0`);
+        }, 120);
     }
 
     // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
@@ -115,16 +131,8 @@
             return;
         }
 
-        // 3. Fő ág: Szabályos privát fül küldés
+        // 3. Fő ág: Szabályos privát fül nyitás és küldés
         sendTier1PCTab(ws, senderId, targetNick);
-
-        // 4. Garantált kézbesítési fallback: ha 1.2 másodpercig nincs megerősítve, lakat és nyilvános
-        setTimeout(() => {
-            const state = userDeliveryState.get(senderId);
-            if (state && state.tier === 1) {
-                sendTier2MainPadlock(ws, senderId, targetNick);
-            }
-        }, 1200);
     }
 
     // Bejövő szerver csomagok vizsgálata
