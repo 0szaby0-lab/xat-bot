@@ -160,30 +160,22 @@ function scheduleReconnect() {
 
 const knownUsers = new Map();
 const lastInteraction = new Map();
+let lastTargetId = '';
 let lastTargetNick = '';
+const userDeliveryState = new Map();
 
 const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
 const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
 
-function triggerRoomFallback(nick) {
-    if (!nick) return;
-    addLog(`[FALLBACK CHAT] Messaging @${nick} in main room...`);
-    SendC('xatCommand', '', JSON.stringify({
-        Type: 'Send',
-        Command: 'Send',
-        Page: 'messages',
-        Message: ROOM_FALLBACK_TEXT(nick),
-        msgId: Math.random().toString(36).substr(2, 9)
-    }));
-}
+// TIER 1 (Elsődleges / Fő): Privát üzenet a közös chatfolyamban (lakat ikonnal, nem nyit fület)
+function sendTier1PM(senderId, nick) {
+    addLog(`[TIER 1 - KÖZÖS CHAT LAKAT] Küldés ${nick} (${senderId}) részére (közös chatfolyam, lakat)...`);
+    userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-function sendPrivateReply(senderId) {
-    addLog(`[KÖZÖS CHAT PRIVÁT (PM)] Privát üzenet küldése ${senderId} részére (csak ketten látják)...`);
-
-    // 1. Standard PM on the common chat (seen exclusively by sender & receiver with padlock)
+    // Standard PM whisper on main room
     sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
 
-    // 2. Native WASM PrivateMessage action (renders on common chat as <priv>)
+    // WASM native dispatch (renders directly as <priv> on common chat)
     try {
         SendC('xatCommand', '', JSON.stringify({
             Command: 'Action',
@@ -195,13 +187,38 @@ function sendPrivateReply(senderId) {
             name: 'PrivateMessage'
         }));
     } catch (_) {}
-
-    // 3. Also route to PC tab in case the user has a tab open
-    sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
-    sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
 }
 
-function handleUserInteraction(senderId, text, isClick) {
+// TIER 2 (Fallback 1): Privát chat fül (ha a fő chaten a lakat le van zárva)
+function sendTier2PC(senderId, nick) {
+    addLog(`[TIER 2 - PRIVÁT FÜL] Fő chaten a lakat lezárva, külön privát fül nyitása és küldés: ${nick} (${senderId})...`);
+    userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
+
+    // 1. Open PC tab on target client
+    sendPacket(`<z d="${senderId}" t="/" />`);
+
+    setTimeout(() => {
+        // 2. Send inside PC tab
+        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
+    }, 200);
+}
+
+// TIER 3 (Fallback 2): Fő chaten nyilvánosan ahol mindenki látja (ha mindkettő privát le van zárva)
+function sendTier3Public(senderId, nick) {
+    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Mindkét privát zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
+    userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
+
+    SendC('xatCommand', '', JSON.stringify({
+        Type: 'Send',
+        Command: 'Send',
+        Page: 'messages',
+        Message: ROOM_FALLBACK_TEXT(nick),
+        msgId: Math.random().toString(36).substr(2, 9)
+    }));
+}
+
+function handleUserInteraction(senderId, text, isClick, isPCTab) {
     const now = Date.now();
     // 5 seconds debounce per user
     if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 5000)) {
@@ -209,6 +226,7 @@ function handleUserInteraction(senderId, text, isClick) {
     }
     lastInteraction.set(senderId, now);
 
+    lastTargetId = senderId;
     const userObj = knownUsers.get(senderId);
     let targetNick = userObj ? userObj.cleanNick : `User_${senderId}`;
     if (!targetNick || targetNick === 'User_' + senderId) {
@@ -216,17 +234,23 @@ function handleUserInteraction(senderId, text, isClick) {
     }
     lastTargetNick = targetNick;
 
-    addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, text="${text}").`);
+    addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, isPCTab=${isPCTab}, text="${text}").`);
 
-    // If target has friend-only lock, fallback to room chat
-    if (userObj && userObj.isFriendOnly) {
-        addLog(`[ZÁROLT PRIVÁT] ${targetNick} barát-záras, közös chatre válaszolunk...`);
-        setTimeout(() => triggerRoomFallback(targetNick), 400);
+    // If user already chats inside a PC tab, reply inside PC tab (Tier 2)
+    if (isPCTab) {
+        sendTier2PC(senderId, targetNick);
         return;
     }
 
-    // Default: EXCLUSIVELY PRIVATE CHAT (PC tab + PM)
-    sendPrivateReply(senderId);
+    // If known to have friend-only PM lock from flags, start directly with Tier 2
+    if (userObj && userObj.isFriendOnly) {
+        addLog(`[LAKAT ZÁROLVA] ${targetNick} közös chat lakat zárolva, Tier 2 (privát fül) indítása...`);
+        sendTier2PC(senderId, targetNick);
+        return;
+    }
+
+    // FŐ ALAPÉRTELMEZETT: Tier 1 (Közös chatfolyamban lakat ikonnal, nem nyit fület)
+    sendTier1PM(senderId, targetNick);
 }
 
 let activeWs = null;
@@ -381,15 +405,35 @@ function handleJson(raw) {
                         const isForMe = !dMatch || dMatch[1] === botId || dMatch[1] === myServerId;
 
                         if (isForMe && senderId && senderId !== botId && senderId !== myServerId && senderId !== '0' && senderId !== '1' && senderId !== '10101' && senderId !== '30303') {
-                            handleUserInteraction(senderId, text, pkt.includes('t="/l"'));
+                            const isClick = pkt.includes('t="/l"');
+                            const isPCTab = pkt.includes('s="2"') || (pkt.startsWith('<z ') && !isClick);
+                            handleUserInteraction(senderId, text, isClick, isPCTab);
                         }
                     }
                 }
 
-                // Handle server rejection when recipient has PM locked (friend-only)
-                if (str.includes('Not added you as a friend') || str.includes('only accepts private messages from friends') || str.includes('cannot send private message')) {
-                    if (lastTargetNick) {
-                        triggerRoomFallback(lastTargetNick);
+                // Hierarchical Escalation on Server Rejection:
+                const isRejection = str.includes('Not added you as a friend') ||
+                                    str.includes('only accepts private messages from friends') ||
+                                    str.includes('cannot send private message') ||
+                                    str.includes('does not accept private') ||
+                                    str.includes('cannot private message') ||
+                                    str.includes('blocked');
+
+                if (isRejection && lastTargetId) {
+                    const currentState = userDeliveryState.get(lastTargetId) || { nick: lastTargetNick, tier: 1 };
+                    addLog(`[SZERVER ELUTASÍTÁS - TIER ${currentState.tier} ZÁROLVA]: Target: ${currentState.nick} (${lastTargetId})`);
+
+                    if (currentState.tier === 1) {
+                        // Tier 1 (fő chat lakat) zárolva -> Lépés Tier 2-re (Privát chat fül)
+                        setTimeout(() => {
+                            sendTier2PC(lastTargetId, currentState.nick);
+                        }, 300);
+                    } else if (currentState.tier === 2) {
+                        // Tier 2 (privát fül) is zárolva -> Lépés Tier 3-ra (Fő chaten nyilvánosan, ahol mindenki látja)
+                        setTimeout(() => {
+                            sendTier3Public(lastTargetId, currentState.nick);
+                        }, 300);
                     }
                 }
 
