@@ -251,13 +251,6 @@ function sendTier1PCTab(senderId, nick) {
     addLog(`[TIER 1 - PRIVÁT CSEVEGŐ FÜL] Privát csevegő fül nyitása és küldés ${nick} (${senderId}) részére...`);
     userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-    const msgId = Math.random().toString(36).substr(2, 9);
-    const opts = Buffer.from(JSON.stringify({
-        isTranslated: "",
-        msgId: msgId,
-        type: "msg"
-    })).toString('base64');
-
     // 1. WASM native PrivateChat init (nyitja a privát csevegő fül munkamenetet a WASM-ban)
     try {
         SendC('xatCommand', '', JSON.stringify({
@@ -270,27 +263,12 @@ function sendTier1PCTab(senderId, nick) {
         }));
     } catch (_) {}
 
-    // 2. Privát csevegő fül (PC tab) megnyitása & tickle jelzés
+    // 2. Szabályos xat privát fül nyitás
     sendPacket(`<z d="${senderId}" t="/" />`);
-    sendPacket(`<z d="${senderId}" t="/l" />`);
 
     setTimeout(() => {
-        // 3. Üzenet a privát csevegő fülbe (HTML5 kliens elvárja a base64 o opts-ot, a sender u-t és az s="2"-t)
-        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-        sendPacket(`<z d="${senderId}" u="${botId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-        sendPacket(`<p u="${senderId}" d="${senderId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-
-        // 4. WASM közvetlen küldés a megnyitott privát fülbe
-        try {
-            SendC('xatCommand', '', JSON.stringify({
-                Type: 'Send',
-                Command: 'Send',
-                Page: 'messages',
-                Message: PM_REPLY_TEXT,
-                msgId: msgId
-            }));
-        } catch (_) {}
+        // 3. Szabályos xat privát üzenet küldés a fülbe (s="2")
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
     }, 150);
 }
 

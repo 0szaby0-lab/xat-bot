@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xath.hu Auto-Reply on Profile Click
 // @namespace    https://xath.hu/
-// @version      1.2.0
+// @version      1.3.0
 // @description  Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit
 // @match        *://xath.hu/*
 // @match        *://*.xath.hu/*
@@ -13,6 +13,7 @@
 (function () {
     'use strict';
 
+    const TARGET_USER_ID = '2000000'; // Szaby azonosítója
     const STORE_KEY = 'xath_autoreply_cfg';
     let savedCfg = {};
     try { savedCfg = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (_) {}
@@ -23,10 +24,10 @@
         debounceMs: 3000
     }, savedCfg);
 
-    // Kényszerített bekapcsolás és v1.2 frissítés
-    if (localStorage.getItem('xath_ar_v12') !== '1') {
+    // Kényszerített bekapcsolás és v1.3 frissítés
+    if (localStorage.getItem('xath_ar_v13') !== '1') {
         config.enabled = true;
-        localStorage.setItem('xath_ar_v12', '1');
+        localStorage.setItem('xath_ar_v13', '1');
         try { localStorage.setItem(STORE_KEY, JSON.stringify(config)); } catch (_) {}
     }
 
@@ -35,46 +36,28 @@
     }
 
     let activeSocket = null;
-    let myUserId = '2000000';
-    try {
-        const rawTodo = localStorage.getItem('todo');
-        if (rawTodo) {
-            const t = JSON.parse(rawTodo);
-            if (t.w_userno) myUserId = String(t.w_userno);
-        }
-    } catch (_) {}
+    let currentTabUserId = null;
     let lastTargetId = '';
     let lastTargetNick = '';
     const lastInteraction = new Map();
     const knownUsers = new Map();
     const userDeliveryState = new Map();
 
-    // 1. TIER KÜLDÉSI FÜGGVÉNYEK
+    // 1. TIER KÜLDÉSI FÜGGVÉNYEK (SZIGORÚAN SZABVÁNYOS XAT CSOMAGOK)
 
     // Tier 1: Privát csevegő fül (PC tab) - Elsődleges
     function sendTier1PCTab(ws, senderId, nick) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-        const msgId = Math.random().toString(36).substr(2, 9);
-        const opts = btoa(JSON.stringify({
-            isTranslated: "",
-            msgId: msgId,
-            type: "msg"
-        }));
-
-        // Fül nyitás és tickle
+        // 1. Privát csevegő fül megnyitása a célfelhasználó felé
         ws.send(`<z d="${senderId}" t="/" />\0`);
-        ws.send(`<z d="${senderId}" t="/l" />\0`);
 
+        // 2. Üzenet elküldése a privát csevegő fülbe (s="2")
         setTimeout(() => {
-            if (ws.readyState !== WebSocket.OPEN) return;
-            const myId = myUserId || (window.config && window.config.MyId) || '';
-            ws.send(`<z d="${senderId}" u="${myId}_0" t="${config.replyText}" o="${opts}" s="2" />\0`);
-            ws.send(`<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
-            ws.send(`<p u="${senderId}" d="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
-            ws.send(`<p u="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
-        }, 120);
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(`<p u="${senderId}" t="${config.replyText}" s="2" />\0`);
+        }, 150);
     }
 
     // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
@@ -96,6 +79,11 @@
     function handleUserInteraction(ws, senderId, text, isClick, isPCTab) {
         if (!config.enabled) return;
 
+        // Csak akkor küldünk választ Szabyként, ha ez a böngésző fül ténylegesen Szaby!
+        if (currentTabUserId && currentTabUserId !== TARGET_USER_ID) {
+            return;
+        }
+
         const now = Date.now();
         if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < config.debounceMs)) {
             return;
@@ -110,18 +98,16 @@
 
         const isGuest = parseInt(senderId, 10) > 4000000000;
 
-        console.log(`[AUTO-REPLY] Felhasználó: ${targetNick} (${senderId}, isGuest=${isGuest}, isClick=${isClick}, isPCTab=${isPCTab})`);
+        console.log(`[AUTO-REPLY] Interakció: ${targetNick} (${senderId}, isGuest=${isGuest}, click=${isClick})`);
 
-        // 1. Ha Friends-Only zárolt: ugrás a fő chatre nyilvánosan
+        // 1. Ha Friends-Only zárolt: azonnal fő chat nyilvános
         if (userObj && userObj.isFriendOnly) {
-            console.log('[AUTO-REPLY] Friends-Only profil -> Nyilvános kiírás a fő chaten');
             sendTier3Public(ws, senderId, targetNick);
             return;
         }
 
-        // 2. Ha a felhasználó vendég (Guest) vagy NoPC tiltása van (nem tud privát fület fogadni):
+        // 2. Ha vendég vagy NoPC tiltott (nem tud privát fület nyitni):
         if (isGuest || (userObj && userObj.isNoPC)) {
-            console.log('[AUTO-REPLY] Vendég / NoPC profil -> Lakat és nyilvános megerősítés');
             sendTier2MainPadlock(ws, senderId, targetNick);
             setTimeout(() => {
                 sendTier3Public(ws, senderId, targetNick);
@@ -129,14 +115,13 @@
             return;
         }
 
-        // 3. Fő ág: Privát csevegő fülbe küldés
+        // 3. Fő ág: Szabályos privát fül küldés
         sendTier1PCTab(ws, senderId, targetNick);
 
         // 4. Garantált kézbesítési fallback: ha 1.2 másodpercig nincs megerősítve, lakat és nyilvános
         setTimeout(() => {
             const state = userDeliveryState.get(senderId);
             if (state && state.tier === 1) {
-                console.log('[AUTO-REPLY] Privát fül fallback -> Lakat és nyilvános küldés');
                 sendTier2MainPadlock(ws, senderId, targetNick);
             }
         }, 1200);
@@ -145,15 +130,6 @@
     // Bejövő szerver csomagok vizsgálata
     function inspectPacket(str, ws) {
         if (!str || typeof str !== 'string') return;
-
-        // Saját azonosító kinyerése
-        if (!myUserId) {
-            const vMatch = str.match(/<v [^>]*i="(\d+)"/);
-            if (vMatch) myUserId = vMatch[1];
-            if (!myUserId && window.config && window.config.MyId) {
-                myUserId = String(window.config.MyId);
-            }
-        }
 
         // Felhasználók és lakat / no-pc státusz nyilvántartása
         if (str.includes('<u ')) {
@@ -184,16 +160,17 @@
                 const text = tMatch ? tMatch[1] : '';
                 let senderId = uMatch ? uMatch[1] : null;
 
-                const myId = myUserId || (window.config && String(window.config.MyId)) || '2000000';
-                if (!senderId && dMatch && dMatch[1] !== myId && dMatch[1] !== '2000000') {
+                if (!senderId && dMatch && dMatch[1] !== TARGET_USER_ID) {
                     senderId = dMatch[1];
                 }
-                const isForMe = !dMatch || dMatch[1] === myId || dMatch[1] === '2000000';
 
-                if (isForMe && senderId && senderId !== myId && senderId !== '2000000' && senderId !== '0' && senderId !== '1') {
+                // Csak akkor válaszolunk, ha a csomag Szabynak (2000000) érkezett
+                const isForSzaby = dMatch ? dMatch[1] === TARGET_USER_ID : (currentTabUserId === TARGET_USER_ID);
+
+                if (isForSzaby && senderId && senderId !== TARGET_USER_ID && senderId !== '0' && senderId !== '1') {
                     const isClick = pkt.includes('t="/l"');
                     const isPCTab = pkt.includes('s="2"') || (pkt.startsWith('<z ') && !isClick);
-                    console.log('[AUTO-REPLY INTERACTION DETECTED] Sender:', senderId, 'isClick:', isClick, 'isPCTab:', isPCTab, 'text:', text);
+                    console.log('[AUTO-REPLY INTERACTION DETECTED] Feladó:', senderId, 'Kattintás:', isClick, 'Szöveg:', text);
                     handleUserInteraction(ws, senderId, text, isClick, isPCTab);
                 }
             }
@@ -233,15 +210,44 @@
         }
     }
 
-    // 2. WEBSOCKET ELFOGÁS
+    // 2. WEBSOCKET ELFOGÁS ÉS HELYI FELHASZNÁLÓ BEAZONOSÍTÁSA
     const targetScope = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
     const OrigWebSocket = targetScope.WebSocket || window.WebSocket;
 
     function CustomWebSocket(...args) {
         const ws = new OrigWebSocket(...args);
-        activeSocket = ws;
+
+        // Kimenő csomagok vizsgálata a helyi felhasználó beazonosításához
+        const origSend = ws.send;
+        ws.send = function (data) {
+            try {
+                let s = '';
+                if (typeof data === 'string') s = data;
+                else if (data instanceof ArrayBuffer) s = new TextDecoder().decode(data);
+                else if (data instanceof Uint8Array) s = new TextDecoder().decode(data);
+
+                if (s.startsWith('<y ') || s.startsWith('<j2 ')) {
+                    const uMatch = s.match(/\bu="(\d+)"/);
+                    if (uMatch) {
+                        currentTabUserId = uMatch[1];
+                        console.log('[AUTO-REPLY] Helyi böngészőfül felhasználó ID:', currentTabUserId);
+
+                        if (currentTabUserId === TARGET_USER_ID) {
+                            activeSocket = ws;
+                            callKeeper('USER_ACTIVE', { user: 'Szaby' });
+                        }
+                    }
+                }
+            } catch (_) {}
+            return origSend.apply(this, arguments);
+        };
 
         ws.addEventListener('message', (ev) => {
+            // Ha ez a böngésző fül NEM Szaby, semmit nem csinálunk
+            if (currentTabUserId && currentTabUserId !== TARGET_USER_ID) {
+                return;
+            }
+
             if (typeof ev.data === 'string') {
                 inspectPacket(ev.data, ws);
             } else if (ev.data instanceof ArrayBuffer) {
@@ -386,7 +392,7 @@
     const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
 
     function callKeeper(type, data = null) {
-        // 1. PostMessage híd az izolált content_bridge felé (Chrome Extension MV3)
+        // PostMessage híd a háttér Service Worker felé
         try {
             window.postMessage({
                 type: 'XATH_KEEPER_CALL',
@@ -394,7 +400,7 @@
             }, '*');
         } catch (_) {}
 
-        // 2. Tampermonkey / Violentmonkey (GM_xmlhttpRequest)
+        // Tampermonkey fallback
         if (typeof GM_xmlhttpRequest !== 'undefined') {
             const endpoints = {
                 'SYNC_SESSION': '/api/sync-session',
@@ -412,7 +418,7 @@
             } catch (_) {}
         }
 
-        // 3. Közvetlen fetch fallback
+        // Közvetlen fetch fallback
         try {
             const path = type === 'SYNC_SESSION' ? '/api/sync-session' : (type === 'USER_INACTIVE' ? '/user-inactive' : '/user-active');
             fetch(`${KEEPER_URL}${path}`, {
@@ -424,28 +430,29 @@
     }
 
     function syncKeeperSession() {
+        if (currentTabUserId && currentTabUserId !== TARGET_USER_ID) return;
         try {
             const rawTodo = localStorage.getItem('todo');
             if (!rawTodo) return;
             const todoData = JSON.parse(rawTodo);
-            if (!todoData || !todoData.PassHash || String(todoData.w_userno || '') !== '2000000') return;
+            if (!todoData || !todoData.PassHash || String(todoData.w_userno || '') !== TARGET_USER_ID) return;
             callKeeper('SYNC_SESSION', { user: 'Szaby', todo: todoData });
         } catch (_) {}
     }
 
     function sendKeeperHeartbeat() {
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
-            return;
-        }
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
+        if (currentTabUserId && currentTabUserId !== TARGET_USER_ID) return;
         callKeeper('USER_ACTIVE', { user: 'Szaby' });
     }
 
     function sendKeeperExit() {
-        if (window !== window.top) return; // Kizárólag a legfelső ablak zárásakor
+        if (window !== window.top) return;
+        if (currentTabUserId && currentTabUserId !== TARGET_USER_ID) return;
         callKeeper('USER_INACTIVE', { user: 'Szaby' });
     }
 
-    setTimeout(syncKeeperSession, 1500);
+    setTimeout(syncKeeperSession, 2000);
     setInterval(sendKeeperHeartbeat, 15000);
 
     if (window === window.top) {
