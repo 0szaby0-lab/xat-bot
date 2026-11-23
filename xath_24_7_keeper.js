@@ -258,28 +258,8 @@ function sendTier1PCTab(senderId, nick) {
         type: "msg"
     })).toString('base64');
 
-    // 1. WASM native PrivateMessage dispatch
-    try {
-        SendC('xatCommand', '', JSON.stringify({
-            Command: 'Action',
-            Message: PM_REPLY_TEXT,
-            Next: 'messages',
-            Page: 'actions',
-            Type: 'Action',
-            UserNo: parseInt(senderId, 10),
-            name: 'PrivateMessage'
-        }));
-    } catch (_) {}
-
-    // 2. Szabályos xat privát fül nyitás
-    sendPacket(`<z d="${senderId}" t="/" />`);
-
-    setTimeout(() => {
-        // 3. Szabályos xat privát csevegő üzenet küldése a fülbe valódi <z> csomagokkal
-        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-        sendPacket(`<z d="${senderId}" u="${botId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
-        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
-    }, 120);
+    // Szabályos xat privát csevegő fül üzenet küldése
+    sendPacket(`<z d="${senderId}" u="${botId}" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
 }
 
 // TIER 2 (FALLBACK 1): Fő chaten lakatban (<priv>) ha a privát csevegő fül zárolva van

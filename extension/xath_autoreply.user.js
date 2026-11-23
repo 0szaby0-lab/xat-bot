@@ -53,6 +53,26 @@
 
     // 1. TIER KÜLDÉSI FÜGGVÉNYEK (SZIGORÚAN SZABVÁNYOS XAT CSOMAGOK)
 
+    function sendRawPacket(ws, xml) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        try {
+            const act = (typeof unsafeWindow !== 'undefined' ? unsafeWindow._Activity : window._Activity) ||
+                        (typeof parent !== 'undefined' && parent._Activity) ||
+                        (typeof window.top !== 'undefined' && window.top._Activity);
+            if (act && act.instance && typeof act.instance.SendSock === 'function') {
+                act.instance.SendSock(xml);
+                return;
+            }
+        } catch (_) {}
+
+        try {
+            const bytes = new TextEncoder().encode(xml);
+            ws.send(bytes.buffer);
+        } catch (_) {
+            try { ws.send(xml); } catch (_) {}
+        }
+    }
+
     // Tier 1: Privát csevegő fül (PC tab) - Elsődleges
     function sendTier1PCTab(ws, senderId, nick) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -64,23 +84,15 @@
             ? btoa(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" }))
             : Buffer.from(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" })).toString('base64');
 
-        // 1. Privát csevegő fül megnyitása a célfelhasználó felé
-        ws.send(`<z d="${senderId}" t="/" />\0`);
-
-        // 2. Üzenet elküldése valódi <z> privát csevegő csomagokkal a fülbe
-        setTimeout(() => {
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            ws.send(`<z d="${senderId}" u="${myId}_0" t="${config.replyText}" o="${opts}" s="2" />\0`);
-            ws.send(`<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
-            ws.send(`<z d="${senderId}" t="${config.replyText}" />\0`);
-        }, 120);
+        // Küldés a privát csevegő fülbe natív SendSock / bináris ArrayBuffer formátumban NUL byte nélkül
+        sendRawPacket(ws, `<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />`);
     }
 
     // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
     function sendTier2MainPadlock(ws, senderId, nick) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
-        ws.send(`<p u="${senderId}" t="${config.replyText}" />\0`);
+        sendRawPacket(ws, `<p u="${senderId}" t="${config.replyText}" />`);
     }
 
     // Tier 3: Fő chaten nyilvánosan (@Nick) - Fallback 2
@@ -88,7 +100,7 @@
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
         const pubMsg = `@${nick} ${config.fallbackText}`;
-        ws.send(`<m t="${pubMsg}" />\0`);
+        sendRawPacket(ws, `<m t="${pubMsg}" />`);
     }
 
     // Interakció kezelése és szigorú prioritási lépcső
