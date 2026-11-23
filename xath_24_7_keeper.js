@@ -163,50 +163,46 @@ const lastInteraction = new Map();
 let lastTargetNick = '';
 
 const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
-const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
+const ROOM_GREETING_TEXT = (nick) => `@${nick} Hey! Thanks for reaching out, welcome and enjoy the music on xmradio! (cool)`;
 
-function triggerRoomFallback(nick) {
+function triggerRoomGreeting(nick) {
     if (!nick) return;
-    addLog(`[FALLBACK CHAT] Messaging @${nick} in main room...`);
+    addLog(`[CHAT MESSAGE] Greeting @${nick} in main room...`);
     SendC('xatCommand', '', JSON.stringify({
         Type: 'Send',
         Command: 'Send',
         Page: 'messages',
-        Message: ROOM_FALLBACK_TEXT(nick),
+        Message: ROOM_GREETING_TEXT(nick),
         msgId: Math.random().toString(36).substr(2, 9)
     }));
 }
 
 function handleUserInteraction(senderId, text, isClick) {
     const now = Date.now();
-    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 150000)) {
-        return; // debounce 2.5 min per user
+    // 15 seconds debounce per user
+    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 15000)) {
+        return;
     }
     lastInteraction.set(senderId, now);
 
     const userObj = knownUsers.get(senderId);
-    const targetNick = userObj ? userObj.cleanNick : `User_${senderId}`;
+    let targetNick = userObj ? userObj.cleanNick : `User_${senderId}`;
+    if (!targetNick || targetNick === 'User_' + senderId) {
+        targetNick = 'friend';
+    }
     lastTargetNick = targetNick;
 
     addLog(`[INTERACTION] User ${targetNick} (${senderId}) clicked or messaged Szaby.`);
 
-    // If user is already identified as having friend-only lock
-    if (userObj && userObj.isFriendOnly) {
-        addLog(`[ZÁROLT PRIVÁT] ${targetNick} barát-záras, közös chatre válaszolunk...`);
-        setTimeout(() => triggerRoomFallback(targetNick), 800);
-        return;
-    }
-
-    // Try Private Message first
-    const opts = Buffer.from(JSON.stringify({
-        isTranslated: "",
-        msgId: Math.random().toString(36).substr(2, 9),
-        type: "msg"
-    })).toString('base64');
-
-    sendPacket(`<z d="${senderId}" t="/l" />`);
+    // 1. Post public tag in main chat room so the user sees it immediately on screen
     setTimeout(() => {
-        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        triggerRoomGreeting(targetNick);
+    }, 500);
+
+    // 2. Open PC Tab and send in private as well
+    sendPacket(`<z d="${senderId}" t="/" />`);
+    setTimeout(() => {
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
         sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
     }, 400);
 }
@@ -369,7 +365,7 @@ function handleJson(raw) {
                 // Handle server rejection when recipient has PM locked (friend-only)
                 if (str.includes('Not added you as a friend') || str.includes('only accepts private messages from friends')) {
                     if (lastTargetNick) {
-                        triggerRoomFallback(lastTargetNick);
+                        triggerRoomGreeting(lastTargetNick);
                     }
                 }
 
