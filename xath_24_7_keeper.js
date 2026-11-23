@@ -146,11 +146,74 @@ let pingTimer = null;
 let hasGreeted = false;
 let reconnectTimer = null;
 
+let isStandby = false;
+let lastUserHeartbeat = 0;
+let standbyCooldownUntil = 0;
+let standbyWatcherTimer = null;
+
+function enterStandbyMode(reason) {
+    const wasStandby = isStandby;
+    isStandby = true;
+    lastUserHeartbeat = Date.now();
+    standbyCooldownUntil = Date.now() + 120000; // 2 perc védelem ha nincs heartbeat
+
+    if (!wasStandby) {
+        addLog(`[STANDBY AKTIVÁLVA] Indok: ${reason}. A 24/7 keeper átadja a helyet a PC-nek.`);
+    }
+
+    if (activeWs) {
+        try {
+            activeWs.close(1000, 'Yielding to PC user');
+        } catch (_) {}
+    }
+    joined = false;
+
+    if (!standbyWatcherTimer) {
+        standbyWatcherTimer = setInterval(checkStandbyLoop, 10000);
+    }
+}
+
+function checkStandbyLoop() {
+    if (!isStandby) return;
+
+    const now = Date.now();
+    // 1. Ha az elmúlt 35 másodpercben jött heartbeat a böngészőből, a felhasználó aktív
+    if (now - lastUserHeartbeat < 35000) {
+        return;
+    }
+
+    // 2. Ha nem jött heartbeat, de még tart a minimális cooldown (pl. más eszközről belépés):
+    if (now < standbyCooldownUntil) {
+        addLog(`[STANDBY] Várakozás a PC használat befejezésére (${Math.round((standbyCooldownUntil - now) / 1000)}s van hátra)...`);
+        return;
+    }
+
+    // 3. Ha lejárt a heartbeat és a cooldown is -> a felhasználó kilépett a PC-ről!
+    exitStandbyMode('Inaktivitás / Kilépés észlelve');
+}
+
+function exitStandbyMode(reason) {
+    if (!isStandby) return;
+    isStandby = false;
+    standbyCooldownUntil = 0;
+    lastUserHeartbeat = 0;
+    if (standbyWatcherTimer) {
+        clearInterval(standbyWatcherTimer);
+        standbyWatcherTimer = null;
+    }
+    addLog(`[STANDBY FELOLDVA] ${reason || ''}. 24/7 keeper visszacsatlakozik az xmradio szobába.`);
+    scheduleReconnect();
+}
 
 function scheduleReconnect() {
+    if (isStandby) {
+        addLog('[AUTO-RECONNECT SKIPPED] Standby aktív (felhasználó PC-n van), nem csatlakozunk újra.');
+        return;
+    }
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
+        if (isStandby) return;
         if (!activeWs || activeWs.readyState === WebSocket.CLOSED) {
             addLog('[AUTO-RECONNECT] Re-entering room...');
             SendC('leaveBackground', '', roomName);
@@ -549,6 +612,12 @@ function handleJson(raw) {
                     }
                 }
 
+                // Duplicate login / kick észlelése
+                if (str.includes('<dup') || str.includes('<logout') || str.includes('t="/k"') || str.includes('<k ') || str.includes('duplicate') || str.includes('another location')) {
+                    addLog('[DUPLICATE SESSION] Belépés történt egy másik eszközről (PC/telefon)! Standby mód bekapcsolása...');
+                    enterStandbyMode('Szerver duplikált bejelentkezési kick');
+                }
+
                 SendC('xatMessageReceived', '#MESSAGE', buf.toString('base64'));
             });
 
@@ -556,9 +625,14 @@ function handleJson(raw) {
                 addLog(`[WS CLOSED] Code: ${code}, Reason: ${reason || ''}`);
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
-                scheduleReconnect();
-            });
 
+                // Ha a bezárás duplicate vagy kick jellegű kód (1000, 1008, 4000) és nincs még standby
+                if (code === 1008 || code === 4000 || (reason && reason.toLowerCase().includes('dup'))) {
+                    enterStandbyMode(`Zárási kód: ${code} (${reason || 'duplicate'})`);
+                } else {
+                    scheduleReconnect();
+                }
+            });
 
             activeWs.onerror = (err) => {
                 addLog(`[WS ERROR] ${err.message}`);
@@ -576,14 +650,46 @@ function handleJson(raw) {
 const HTTP_PORT = parseInt(process.env.PORT || '10000', 10);
 const startTime = Date.now();
 const srv = http.createServer((req, res) => {
+    // CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        return res.end();
+    }
+
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+    if (url.pathname === '/user-active') {
+        enterStandbyMode('PC / böngésző heartbeat érkezett');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: true }));
+    }
+
+    if (url.pathname === '/user-inactive') {
+        addLog('[HEARTBEAT LEJÁRT] Böngésző bezárás jelzés érkezett, Standby feloldása...');
+        lastUserHeartbeat = 0;
+        exitStandbyMode('Böngésző bezárva');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'resuming', ok: true, isStandby: false }));
+    }
+
+    if (url.pathname === '/force-reconnect') {
+        addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése...');
+        exitStandbyMode('Manuális Force Reconnect');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'reconnecting', ok: true }));
+    }
+
     if (url.pathname === '/health' || url.pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
-            status: joined ? 'online' : 'connecting',
+            status: isStandby ? 'standby' : (joined ? 'online' : 'connecting'),
             user: botNick,
             id: myServerId,
             room: roomName,
+            isStandby: isStandby,
             proxy: PROXY_URL || 'Direct',
             packetsIn: totalPacketsIn,
             packetsOut: totalPacketsOut,
@@ -598,18 +704,23 @@ const srv = http.createServer((req, res) => {
 
     // Default HTML Dashboard
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    const badgeColor = isStandby ? '#d29922' : (joined ? '#238636' : '#da3633');
+    const badgeText = isStandby ? 'STANDBY (PC-n használatban)' : (joined ? 'ONLINE 24/7' : 'CONNECTING...');
     res.end(`<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>xath 24/7 Keeper - ${botNick}</title>
 <style>body{background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:20px;max-width:700px;margin:auto;}
-.badge{padding:4px 10px;border-radius:12px;font-weight:bold;background:${joined ? '#238636' : '#da3633'};color:#fff;}
+.badge{padding:4px 10px;border-radius:12px;font-weight:bold;background:${badgeColor};color:#fff;}
 pre{background:#161b22;padding:12px;border-radius:6px;overflow-x:auto;max-height:300px;border:1px solid #30363d;font-size:12px;}
+button{background:#238636;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:bold;}
 </style></head>
 <body>
-<h2>xath 24/7 Keeper &bull; <span class="badge">${joined ? 'ONLINE 24/7' : 'CONNECTING...'}</span></h2>
+<h2>xath 24/7 Keeper &bull; <span class="badge">${badgeText}</span></h2>
 <p><b>Felhasználó:</b> ${botNick} (ID: ${myServerId}) | <b>Szoba:</b> ${roomName}</p>
+<p><b>Állapot:</b> ${isStandby ? 'Háttérben vár (PC-ről bejelentkezve)' : (joined ? 'Aktív 24/7 jelenlét' : 'Csatlakozás...')}</p>
 <p><b>Proxy:</b> ${PROXY_URL || 'Direct connection'}</p>
 <p><b>Csomagok (Ki / Be):</b> ${totalPacketsOut} / ${totalPacketsIn}</p>
+<p><a href="/force-reconnect"><button>Force Reconnect (Azonnali újracsatlakozás)</button></a></p>
 <h3>Élő Napló:</h3>
 <pre>${liveLogs.join('\n')}</pre>
 </body></html>`);

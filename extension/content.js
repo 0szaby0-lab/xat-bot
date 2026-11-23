@@ -335,6 +335,39 @@
         };
     }
 
+    // 4. AUTOMATIKUS RENDER 24/7 STANDBY SZINKRONIZÁCIÓ
+    // Amikor a böngészőből belépsz, a Render azonnal átadja a helyét (Standby),
+    // és amikor bezárod a lapot/böngészőt, a Render automatikusan visszatér 24/7 módba!
+    const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
+
+    function sendKeeperHeartbeat() {
+        try {
+            fetch(`${KEEPER_URL}/user-active?user=Szaby`, {
+                method: 'POST',
+                mode: 'no-cors'
+            }).catch(() => {});
+        } catch (_) {}
+    }
+
+    function sendKeeperExit() {
+        try {
+            if (navigator.sendBeacon) {
+                navigator.sendBeacon(`${KEEPER_URL}/user-inactive?user=Szaby`);
+            } else {
+                fetch(`${KEEPER_URL}/user-inactive?user=Szaby`, { method: 'POST', mode: 'no-cors' }).catch(() => {});
+            }
+        } catch (_) {}
+    }
+
+    // Azonnal jelezzük a Rendernek, hogy beléptünk gépről/másik eszközről
+    sendKeeperHeartbeat();
+    // 20 másodpercenként fenntartjuk a Standby állapotot amíg nyitva van
+    setInterval(sendKeeperHeartbeat, 20000);
+
+    // Ha bezárjuk a fület vagy elnavigálunk, azonnal értesítjük a Rendert
+    window.addEventListener('beforeunload', sendKeeperExit);
+    window.addEventListener('pagehide', sendKeeperExit);
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', injectUI);
     } else {
