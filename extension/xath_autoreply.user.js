@@ -341,6 +341,9 @@
     const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
 
     function sendKeeperHeartbeat() {
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
         try {
             const rawTodo = localStorage.getItem('todo');
             let todoData = null;
@@ -365,10 +368,8 @@
         } catch (_) {}
     }
 
-    // Azonnal jelezzük a Rendernek, hogy beléptünk gépről/másik eszközről
-    sendKeeperHeartbeat();
-    // 20 másodpercenként fenntartjuk a Standby állapotot amíg nyitva van
-    setInterval(sendKeeperHeartbeat, 20000);
+    // 25 másodpercenként küldünk állapotot, HA nyitva van a chat websocket
+    setInterval(sendKeeperHeartbeat, 25000);
 
     // Ha bezárjuk a fület vagy elnavigálunk, azonnal értesítjük a Rendert
     window.addEventListener('beforeunload', sendKeeperExit);

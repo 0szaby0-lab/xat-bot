@@ -146,12 +146,17 @@ let pingTimer = null;
 let hasGreeted = false;
 let reconnectTimer = null;
 
+let standbyEnabled = process.env.STANDBY === '1' || args.includes('--standby');
 let isStandby = false;
 let lastUserHeartbeat = 0;
 let standbyCooldownUntil = 0;
 let standbyWatcherTimer = null;
 
 function enterStandbyMode(reason) {
+    if (!standbyEnabled) {
+        addLog(`[STANDBY DISABLED] Kérelem: ${reason} - A 24/7 mód aktív, a kapcsolat nem szakad meg.`);
+        return;
+    }
     const wasStandby = isStandby;
     isStandby = true;
     lastUserHeartbeat = Date.now();
@@ -639,11 +644,11 @@ function handleJson(raw) {
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
 
-                // Ha a bezárás duplicate vagy kick jellegű kód (1000, 1008, 4000) és nincs még standby
-                if (code === 1008 || code === 4000 || reasonStr.toLowerCase().includes('dup')) {
+                if (standbyEnabled && (code === 1008 || code === 4000 || reasonStr.toLowerCase().includes('dup'))) {
                     enterStandbyMode(`Zárási kód: ${code} (${reasonStr || 'duplicate'})`);
                 } else {
-                    scheduleReconnect();
+                    addLog('[AUTO-REBOOT] Tiszta újraindulás a folyamatos 24/7 online jelenléthez...');
+                    setTimeout(() => process.exit(0), 1000);
                 }
             });
 
@@ -721,17 +726,10 @@ const srv = http.createServer((req, res) => {
     }
 
     if (url.pathname === '/force-reconnect') {
-        addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése...');
-        isStandby = false;
-        standbyCooldownUntil = 0;
-        lastUserHeartbeat = 0;
-        if (standbyWatcherTimer) {
-            clearInterval(standbyWatcherTimer);
-            standbyWatcherTimer = null;
-        }
+        addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése -> Tiszta újraindítás...');
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'reconnecting', ok: true }));
-        scheduleReconnect();
+        res.end(JSON.stringify({ status: 'restarting', ok: true }));
+        setTimeout(() => process.exit(0), 400);
         return;
     }
 
