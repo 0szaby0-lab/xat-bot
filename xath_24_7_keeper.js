@@ -167,9 +167,9 @@ const userDeliveryState = new Map();
 const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
 const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
 
-// TIER 1 & 2: Privát csevegő fül ÉS közös chatfolyamban lakat (<priv>)
-function sendPrivateBoth(senderId, nick) {
-    addLog(`[PRIVÁT KÜLDÉS] Privát csevegő fül ÉS közös chat lakat küldése ${nick} (${senderId}) részére...`);
+// TIER 1 (FŐ / PRIMARY): Privát csevegő fül (PC tab)
+function sendTier1PCTab(senderId, nick) {
+    addLog(`[TIER 1 - PRIVÁT CSEVEGŐ FÜL] Privát csevegő fül nyitása és küldés ${nick} (${senderId}) részére...`);
     userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
     const msgId = Math.random().toString(36).substr(2, 9);
@@ -212,28 +212,34 @@ function sendPrivateBoth(senderId, nick) {
                 msgId: msgId
             }));
         } catch (_) {}
-
-        // 5. Üzenet a közös chatfolyamba lakat ikonnal (<priv>)
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
-
-        // 6. WASM native PrivateMessage dispatch (közös chat lakat <priv>)
-        try {
-            SendC('xatCommand', '', JSON.stringify({
-                Command: 'Action',
-                Message: PM_REPLY_TEXT,
-                Next: 'messages',
-                Page: 'actions',
-                Type: 'Action',
-                UserNo: parseInt(senderId, 10),
-                name: 'PrivateMessage'
-            }));
-        } catch (_) {}
     }, 150);
 }
 
-// TIER 3 (Fallback): Fő chaten nyilvánosan ahol mindenki látja (ha a privát le van zárva)
+// TIER 2 (FALLBACK 1): Fő chaten lakatban (<priv>) ha a privát csevegő fül zárolva van
+function sendTier2MainPadlock(senderId, nick) {
+    addLog(`[TIER 2 - FŐ CHAT LAKAT] Privát fül zárolva, lakat küldése a közös chaten ${nick} (${senderId}) részére...`);
+    userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
+
+    // 1. Üzenet a közös chatfolyamba lakat ikonnal (<priv>)
+    sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
+
+    // 2. WASM native PrivateMessage dispatch (közös chat lakat <priv>)
+    try {
+        SendC('xatCommand', '', JSON.stringify({
+            Command: 'Action',
+            Message: PM_REPLY_TEXT,
+            Next: 'messages',
+            Page: 'actions',
+            Type: 'Action',
+            UserNo: parseInt(senderId, 10),
+            name: 'PrivateMessage'
+        }));
+    } catch (_) {}
+}
+
+// TIER 3 (FALLBACK 2): Fő chaten nyilvánosan ahol mindenki látja (ha mindkét privát mód zárolva van)
 function sendTier3Public(senderId, nick) {
-    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Privát zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
+    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Mindkét privát mód zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
     userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
 
     SendC('xatCommand', '', JSON.stringify({
@@ -263,15 +269,22 @@ function handleUserInteraction(senderId, text, isClick, isPCTab) {
 
     addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, isPCTab=${isPCTab}, text="${text}").`);
 
-    // If known to have friend-only PM lock completely blocking private, fallback to room chat
+    // Ha a profilból ismert, hogy a privát TELJESEN zárolt (friends-only padlock):
     if (userObj && userObj.isFriendOnly) {
-        addLog(`[ZÁROLT PRIVÁT] ${targetNick} zárolt profil, közös nyilvános chatre válaszolunk...`);
+        addLog(`[ZÁROLT PROFIL] ${targetNick} profilja friends-only zárolt (mindkét privát zárva), ugrás a fő nyilvános chatre...`);
         sendTier3Public(senderId, targetNick);
         return;
     }
 
-    // Küldés mindkét privát csatornára (privát csevegő fül + közös chat lakat)
-    sendPrivateBoth(senderId, targetNick);
+    // Ha a felhasználónak ismert NoPC tiltása van (csak lakatot fogad, privát fület nem):
+    if (userObj && userObj.isNoPC) {
+        addLog(`[NoPC TILTÁS] ${targetNick} profilja nem fogad privát fület, ugrás a fő chat lakatba...`);
+        sendTier2MainPadlock(senderId, targetNick);
+        return;
+    }
+
+    // FŐ ÁG (Tier 1): Privát csevegő fülbe küldés (NEM ír a fő chaten lakatban!)
+    sendTier1PCTab(senderId, targetNick);
 }
 
 let activeWs = null;
@@ -405,8 +418,9 @@ function handleJson(raw) {
                             const rawNick = nMatch ? nMatch[1] : '';
                             const cleanNick = rawNick.replace(/\([^)]*\)/g, '').replace(/_##.*$/, '').trim() || `User_${uid}`;
                             const flag = fMatch ? parseInt(fMatch[1], 10) : 0;
-                            const isFriendOnly = (flag & 32) !== 0 || uPkt.includes('no-pc') || uPkt.includes('padlock');
-                            knownUsers.set(uid, { cleanNick, rawNick, isFriendOnly });
+                            const isFriendOnly = (flag & 32) !== 0 || uPkt.includes('padlock');
+                            const isNoPC = uPkt.includes('no-pc') || uPkt.includes('nopc');
+                            knownUsers.set(uid, { cleanNick, rawNick, isFriendOnly, isNoPC });
                         }
                     }
                 }
@@ -434,18 +448,45 @@ function handleJson(raw) {
                 }
 
                 // Hierarchical Escalation on Server Rejection:
-                const isRejection = str.includes('Not added you as a friend') ||
-                                    str.includes('only accepts private messages from friends') ||
-                                    str.includes('cannot send private message') ||
-                                    str.includes('does not accept private') ||
-                                    str.includes('cannot private message') ||
-                                    str.includes('blocked');
+                const isFriendOnlyRejection = str.includes('Not added you as a friend') ||
+                                              str.includes('only accepts private messages from friends');
 
-                if (isRejection && lastTargetId) {
-                    addLog(`[SZERVER ELUTASÍTÁS - PRIVÁT ZÁROLVA]: Target: ${lastTargetNick} (${lastTargetId})`);
-                    setTimeout(() => {
-                        sendTier3Public(lastTargetId, lastTargetNick);
-                    }, 300);
+                const isPcRejection = str.includes('does not accept private chats') ||
+                                      str.includes('cannot private chat') ||
+                                      str.includes('has private chat disabled') ||
+                                      str.includes('nopc') ||
+                                      str.includes('only accepts private messages') ||
+                                      str.includes('Not accepting private chat');
+
+                const isGeneralRejection = isFriendOnlyRejection ||
+                                           str.includes('cannot send private message') ||
+                                           str.includes('does not accept private') ||
+                                           str.includes('cannot private message') ||
+                                           str.includes('blocked');
+
+                if ((isGeneralRejection || isPcRejection) && lastTargetId) {
+                    const currentState = userDeliveryState.get(lastTargetId);
+                    const targetNick = lastTargetNick || (currentState ? currentState.nick : `User_${lastTargetId}`);
+
+                    if (isFriendOnlyRejection) {
+                        // Friend-only lock: Mindkét privát csatorna zárva -> Tier 3 nyilvános
+                        addLog(`[SZERVER ELUTASÍTÁS - FRIEND-ONLY ZÁROLVA]: Target: ${targetNick} (${lastTargetId}) -> Tier 3 Fő chat nyilvános`);
+                        setTimeout(() => {
+                            sendTier3Public(lastTargetId, targetNick);
+                        }, 300);
+                    } else if (currentState && currentState.tier === 1) {
+                        // Tier 1 (PC fül) visszadobva -> Tier 2 Fő chat lakat
+                        addLog(`[SZERVER ELUTASÍTÁS - PRIVÁT FÜL ZÁROLVA]: Target: ${targetNick} (${lastTargetId}) -> Tier 2 Fő chat lakat`);
+                        setTimeout(() => {
+                            sendTier2MainPadlock(lastTargetId, targetNick);
+                        }, 300);
+                    } else if (currentState && currentState.tier === 2) {
+                        // Tier 2 (Fő chat lakat) is visszadobva -> Tier 3 Fő chat nyilvános
+                        addLog(`[SZERVER ELUTASÍTÁS - LAKAT IS ZÁROLVA]: Target: ${targetNick} (${lastTargetId}) -> Tier 3 Fő chat nyilvános`);
+                        setTimeout(() => {
+                            sendTier3Public(lastTargetId, targetNick);
+                        }, 300);
+                    }
                 }
 
 
