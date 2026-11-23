@@ -178,34 +178,27 @@ function triggerRoomFallback(nick) {
 }
 
 function sendPrivateReply(senderId) {
-    addLog(`[PRIVÁT KÜLDÉS] Privát válasz küldése: ${senderId}`);
+    addLog(`[KÖZÖS CHAT PRIVÁT (PM)] Privát üzenet küldése ${senderId} részére (csak ketten látják)...`);
 
-    // 1. Open PC Tab on target client
-    sendPacket(`<z d="${senderId}" t="/" />`);
+    // 1. Standard PM on the common chat (seen exclusively by sender & receiver with padlock)
+    sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
 
-    setTimeout(() => {
-        // 2. Private Chat (PC) tab text message
-        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
+    // 2. Native WASM PrivateMessage action (renders on common chat as <priv>)
+    try {
+        SendC('xatCommand', '', JSON.stringify({
+            Command: 'Action',
+            Message: PM_REPLY_TEXT,
+            Next: 'messages',
+            Page: 'actions',
+            Type: 'Action',
+            UserNo: parseInt(senderId, 10),
+            name: 'PrivateMessage'
+        }));
+    } catch (_) {}
 
-        // 3. PC tab message format (s="2")
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
-
-        // 4. Standard PM whisper
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
-
-        // 5. WASM native PrivateMessage dispatch
-        try {
-            SendC('xatCommand', '', JSON.stringify({
-                Command: 'Action',
-                Message: PM_REPLY_TEXT,
-                Next: 'messages',
-                Page: 'actions',
-                Type: 'Action',
-                UserNo: parseInt(senderId, 10),
-                name: 'PrivateMessage'
-            }));
-        } catch (_) {}
-    }, 250);
+    // 3. Also route to PC tab in case the user has a tab open
+    sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
+    sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
 }
 
 function handleUserInteraction(senderId, text, isClick) {
