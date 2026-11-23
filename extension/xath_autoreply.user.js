@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         xath.hu Auto-Reply on Profile Click
 // @namespace    https://xath.hu/
-// @version      1.1.1
-// @description  Automatikus privát üzenet küldése azonnal profilkattintásra és automatikus 24/7 Render szinkronizáció
+// @version      1.2.0
+// @description  Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit
 // @match        *://xath.hu/*
 // @match        *://*.xath.hu/*
 // @run-at       document-start
@@ -10,6 +10,7 @@
 // @connect      xat-bot-qziz.onrender.com
 // ==/UserScript==
 
+(function () {
     'use strict';
 
     const STORE_KEY = 'xath_autoreply_cfg';
@@ -19,14 +20,18 @@
         enabled: true,
         replyText: "Hey there! Thanks for reaching out, enjoy the music! :)",
         fallbackText: "Hey! Your private messages are locked, but welcome and enjoy the music! (cool)",
-        debounceMs: 4000
+        debounceMs: 3000
     }, savedCfg);
 
-    // Ha nincs még kifejezetten beállítva, alapértelmezetten MINDIG BE van kapcsolva
-    if (config.enabled === undefined) config.enabled = true;
+    // Kényszerített bekapcsolás és v1.2 frissítés
+    if (localStorage.getItem('xath_ar_v12') !== '1') {
+        config.enabled = true;
+        localStorage.setItem('xath_ar_v12', '1');
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(config)); } catch (_) {}
+    }
 
     function saveConfig() {
-        localStorage.setItem(STORE_KEY, JSON.stringify(config));
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(config)); } catch (_) {}
     }
 
     let activeSocket = null;
@@ -69,7 +74,7 @@
             ws.send(`<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
             ws.send(`<p u="${senderId}" d="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
             ws.send(`<p u="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
-        }, 150);
+        }, 120);
     }
 
     // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
@@ -103,20 +108,38 @@
         if (!targetNick || targetNick === 'User_' + senderId) targetNick = 'friend';
         lastTargetNick = targetNick;
 
-        // Ha a profilból eleve ismert, hogy a privát Friends-Only zárolt:
+        const isGuest = parseInt(senderId, 10) > 4000000000;
+
+        console.log(`[AUTO-REPLY] Felhasználó: ${targetNick} (${senderId}, isGuest=${isGuest}, isClick=${isClick}, isPCTab=${isPCTab})`);
+
+        // 1. Ha Friends-Only zárolt: ugrás a fő chatre nyilvánosan
         if (userObj && userObj.isFriendOnly) {
+            console.log('[AUTO-REPLY] Friends-Only profil -> Nyilvános kiírás a fő chaten');
             sendTier3Public(ws, senderId, targetNick);
             return;
         }
 
-        // Ha a profil no-pc tiltott (csak lakatot enged):
-        if (userObj && userObj.isNoPC) {
+        // 2. Ha a felhasználó vendég (Guest) vagy NoPC tiltása van (nem tud privát fület fogadni):
+        if (isGuest || (userObj && userObj.isNoPC)) {
+            console.log('[AUTO-REPLY] Vendég / NoPC profil -> Lakat és nyilvános megerősítés');
             sendTier2MainPadlock(ws, senderId, targetNick);
+            setTimeout(() => {
+                sendTier3Public(ws, senderId, targetNick);
+            }, 500);
             return;
         }
 
-        // Fő ág: Kizárólag a privát csevegő fülbe küldünk
+        // 3. Fő ág: Privát csevegő fülbe küldés
         sendTier1PCTab(ws, senderId, targetNick);
+
+        // 4. Garantált kézbesítési fallback: ha 1.2 másodpercig nincs megerősítve, lakat és nyilvános
+        setTimeout(() => {
+            const state = userDeliveryState.get(senderId);
+            if (state && state.tier === 1) {
+                console.log('[AUTO-REPLY] Privát fül fallback -> Lakat és nyilvános küldés');
+                sendTier2MainPadlock(ws, senderId, targetNick);
+            }
+        }, 1200);
     }
 
     // Bejövő szerver csomagok vizsgálata
@@ -178,19 +201,22 @@
 
         // Szerver általi elutasítás észlelése -> Eszkaláció
         const isFriendOnlyRejection = str.includes('Not added you as a friend') ||
-                                      str.includes('only accepts private messages from friends');
+                                      str.includes('only accepts private messages from friends') ||
+                                      str.includes('Csak barátoktól fogad privát');
 
         const isPcRejection = str.includes('does not accept private chats') ||
                               str.includes('cannot private chat') ||
                               str.includes('has private chat disabled') ||
                               str.includes('nopc') ||
                               str.includes('only accepts private messages') ||
-                              str.includes('Not accepting private chat');
+                              str.includes('Not accepting private chat') ||
+                              str.includes('nem fogad privát csevegést');
 
         const isGeneralRejection = isFriendOnlyRejection ||
                                    str.includes('cannot send private message') ||
                                    str.includes('does not accept private') ||
                                    str.includes('cannot private message') ||
+                                   str.includes('nem küldhető privát') ||
                                    str.includes('blocked');
 
         if ((isGeneralRejection || isPcRejection) && lastTargetId) {
@@ -198,21 +224,20 @@
             const targetNick = lastTargetNick || (currentState ? currentState.nick : `User_${lastTargetId}`);
 
             if (isFriendOnlyRejection) {
-                // Friends-only: Ugrás közvetlenül Tier 3-ra (fő chat nyilvános)
                 setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
             } else if (currentState && currentState.tier === 1) {
-                // Tier 1 elutasítva -> Tier 2 (fő chat lakat)
                 setTimeout(() => sendTier2MainPadlock(ws, lastTargetId, targetNick), 250);
             } else if (currentState && currentState.tier === 2) {
-                // Tier 2 is elutasítva -> Tier 3 (fő chat nyilvános)
                 setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
             }
         }
     }
 
     // 2. WEBSOCKET ELFOGÁS
-    const OrigWebSocket = window.WebSocket;
-    window.WebSocket = function (...args) {
+    const targetScope = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+    const OrigWebSocket = targetScope.WebSocket || window.WebSocket;
+
+    function CustomWebSocket(...args) {
         const ws = new OrigWebSocket(...args);
         activeSocket = ws;
 
@@ -234,11 +259,22 @@
         });
 
         return ws;
-    };
-    window.WebSocket.prototype = OrigWebSocket.prototype;
+    }
+
+    CustomWebSocket.prototype = OrigWebSocket.prototype;
+    CustomWebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+    CustomWebSocket.OPEN = OrigWebSocket.OPEN;
+    CustomWebSocket.CLOSING = OrigWebSocket.CLOSING;
+    CustomWebSocket.CLOSED = OrigWebSocket.CLOSED;
+
+    try {
+        window.WebSocket = CustomWebSocket;
+        if (typeof unsafeWindow !== 'undefined') unsafeWindow.WebSocket = CustomWebSocket;
+    } catch (_) {}
 
     // 3. LEBEGŐ FELHASZNÁLÓI FELÜLET (UI GOMB & BEÁLLÍTÁSOK)
     function injectUI() {
+        if (window !== window.top) return; // Csak a fő ablakban jelenik meg
         if (document.getElementById('xath-autoreply-widget')) return;
 
         const container = document.createElement('div');
@@ -273,7 +309,6 @@
         `;
         updateBtn();
 
-        // Kattintásra ki/be kapcsolás, dupla kattintásra beállítások ablak
         btn.onclick = () => {
             config.enabled = !config.enabled;
             saveConfig();
@@ -348,20 +383,18 @@
     }
 
     // 4. AUTOMATIKUS RENDER 24/7 STANDBY SZINKRONIZÁCIÓ
-    // Amikor a böngészőből belépsz, a Render azonnal átadja a helyét (Standby),
-    // és amikor bezárod a lapot/böngészőt, a Render automatikusan visszatér 24/7 módba!
     const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
 
     function callKeeper(type, data = null) {
-        // 1. Chrome kiterjesztés Service Worker (teljesen megkerüli az oldal CSP-jét)
-        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-            try {
-                chrome.runtime.sendMessage({ type, data }, () => {});
-                return;
-            } catch (_) {}
-        }
+        // 1. PostMessage híd az izolált content_bridge felé (Chrome Extension MV3)
+        try {
+            window.postMessage({
+                type: 'XATH_KEEPER_CALL',
+                payload: { type, data }
+            }, '*');
+        } catch (_) {}
 
-        // 2. Tampermonkey / Violentmonkey (GM_xmlhttpRequest megkerüli a CSP-t)
+        // 2. Tampermonkey / Violentmonkey (GM_xmlhttpRequest)
         if (typeof GM_xmlhttpRequest !== 'undefined') {
             const endpoints = {
                 'SYNC_SESSION': '/api/sync-session',
@@ -408,18 +441,17 @@
     }
 
     function sendKeeperExit() {
+        if (window !== window.top) return; // Kizárólag a legfelső ablak zárásakor
         callKeeper('USER_INACTIVE', { user: 'Szaby' });
     }
 
-    // Oldal betöltésekor automatikusan szinkronizáljuk a munkamenet kulcsokat
     setTimeout(syncKeeperSession, 1500);
+    setInterval(sendKeeperHeartbeat, 15000);
 
-    // 25 másodpercenként küldünk állapotot, HA nyitva van a chat websocket
-    setInterval(sendKeeperHeartbeat, 25000);
-
-    // Ha bezárjuk a fület vagy elnavigálunk, azonnal értesítjük a Rendert
-    window.addEventListener('beforeunload', sendKeeperExit);
-    window.addEventListener('pagehide', sendKeeperExit);
+    if (window === window.top) {
+        window.addEventListener('beforeunload', sendKeeperExit);
+        window.addEventListener('pagehide', sendKeeperExit);
+    }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', injectUI);

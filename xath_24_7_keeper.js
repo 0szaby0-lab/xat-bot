@@ -152,8 +152,13 @@ let isStandby = false;
 let lastUserHeartbeat = 0;
 let standbyCooldownUntil = 0;
 let standbyWatcherTimer = null;
+let pendingExitTimer = null;
 
 function enterStandbyMode(reason) {
+    if (pendingExitTimer) {
+        clearTimeout(pendingExitTimer);
+        pendingExitTimer = null;
+    }
     if (!standbyEnabled) {
         addLog(`[STANDBY DISABLED] Kérelem: ${reason} - A 24/7 mód aktív, a kapcsolat nem szakad meg.`);
         return;
@@ -313,22 +318,27 @@ function sendTier2MainPadlock(senderId, nick) {
 
 // TIER 3 (FALLBACK 2): Fő chaten nyilvánosan ahol mindenki látja (ha mindkét privát mód zárolva van)
 function sendTier3Public(senderId, nick) {
-    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Mindkét privát mód zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
+    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Nyilvános kiírás a fő chaten @${nick} részére...`);
     userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
 
-    SendC('xatCommand', '', JSON.stringify({
-        Type: 'Send',
-        Command: 'Send',
-        Page: 'messages',
-        Message: ROOM_FALLBACK_TEXT(nick),
-        msgId: Math.random().toString(36).substr(2, 9)
-    }));
+    const pubText = ROOM_FALLBACK_TEXT(nick);
+    sendPacket(`<m t="${pubText}" />`);
+
+    try {
+        SendC('xatCommand', '', JSON.stringify({
+            Type: 'Send',
+            Command: 'Send',
+            Page: 'messages',
+            Message: pubText,
+            msgId: Math.random().toString(36).substr(2, 9)
+        }));
+    } catch (_) {}
 }
 
 function handleUserInteraction(senderId, text, isClick, isPCTab) {
     const now = Date.now();
-    // 5 seconds debounce per user
-    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 5000)) {
+    // 4 seconds debounce per user
+    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 4000)) {
         return;
     }
     lastInteraction.set(senderId, now);
@@ -341,24 +351,38 @@ function handleUserInteraction(senderId, text, isClick, isPCTab) {
     }
     lastTargetNick = targetNick;
 
-    addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, isPCTab=${isPCTab}, text="${text}").`);
+    const isGuest = parseInt(senderId, 10) > 4000000000;
+
+    addLog(`[INTERACTION] Felhasználó: ${targetNick} (${senderId}, isGuest=${isGuest}) interakciót kezdeményezett (click=${isClick}, isPCTab=${isPCTab}, text="${text}").`);
 
     // Ha a profilból ismert, hogy a privát TELJESEN zárolt (friends-only padlock):
     if (userObj && userObj.isFriendOnly) {
-        addLog(`[ZÁROLT PROFIL] ${targetNick} profilja friends-only zárolt (mindkét privát zárva), ugrás a fő nyilvános chatre...`);
+        addLog(`[ZÁROLT PROFIL] ${targetNick} profilja friends-only zárolt (mindkét privát zárva), azonnali ugrás a fő nyilvános chatre...`);
         sendTier3Public(senderId, targetNick);
         return;
     }
 
-    // Ha a felhasználónak ismert NoPC tiltása van (csak lakatot fogad, privát fület nem):
-    if (userObj && userObj.isNoPC) {
-        addLog(`[NoPC TILTÁS] ${targetNick} profilja nem fogad privát fület, ugrás a fő chat lakatba...`);
+    // Ha a felhasználó vendég vagy NoPC tiltása van:
+    if (isGuest || (userObj && userObj.isNoPC)) {
+        addLog(`[VENDÉG / NoPC] ${targetNick} nem tud privát fület fogadni, azonnali küldés lakatban és fő chaten nyilvánosan...`);
         sendTier2MainPadlock(senderId, targetNick);
+        setTimeout(() => {
+            sendTier3Public(senderId, targetNick);
+        }, 500);
         return;
     }
 
-    // FŐ ÁG (Tier 1): Privát csevegő fülbe küldés (NEM ír a fő chaten lakatban!)
+    // FŐ ÁG (Tier 1): Privát csevegő fülbe küldés
     sendTier1PCTab(senderId, targetNick);
+
+    // GARANTÁLT VÁLASZ: Ha 1.5 másodpercig nem igazolódik vissza a privát fül, menjen lakatban és a fő chaten
+    setTimeout(() => {
+        const state = userDeliveryState.get(senderId);
+        if (state && state.tier === 1) {
+            addLog(`[GARANTÁLT FALLBACK] ${targetNick} (${senderId}) részére lakat és nyilvános megerősítés...`);
+            sendTier2MainPadlock(senderId, targetNick);
+        }
+    }, 1500);
 }
 
 let activeWs = null;
@@ -748,11 +772,18 @@ const srv = http.createServer((req, res) => {
     }
 
     if (url.pathname === '/user-inactive') {
-        addLog('[HEARTBEAT LEJÁRT] Böngésző bezárás jelzés érkezett, Standby feloldása...');
-        lastUserHeartbeat = 0;
-        exitStandbyMode('Böngésző bezárva');
+        addLog('[BÖNGÉSZŐ JELEZTE A KILÉPÉST] 20 másodperces türelmi idő indul (újratöltés elleni védelem)...');
+        if (!pendingExitTimer) {
+            pendingExitTimer = setTimeout(() => {
+                pendingExitTimer = null;
+                if (isStandby && Date.now() - lastUserHeartbeat >= 15000) {
+                    lastUserHeartbeat = 0;
+                    exitStandbyMode('Böngésző végleg bezárva');
+                }
+            }, 20000);
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ status: 'resuming', ok: true, isStandby: false }));
+        return res.end(JSON.stringify({ status: 'grace_period', ok: true, isStandby: isStandby }));
     }
 
     if (url.pathname === '/force-reconnect') {
