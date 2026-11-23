@@ -585,8 +585,10 @@ async function startKeeper() {
         }
     }
 
+    let isGuestFallback = false;
     // 2. Fetch fresh session keys (k1, k2) or guest credentials
     if (!activeK1 || !activeId || activeId === 'auto') {
+        isGuestFallback = true;
         const creds = await fetchGuestCredentials(PROXY_URL);
         if (!creds) {
             console.error('[AUTH FAIL] Unable to fetch session credentials. Retrying in 5 seconds...');
@@ -786,13 +788,14 @@ async function startKeeper() {
                     if (activeK1) {
                         pkt = pkt.replace(/k="[^"]*"/, `k="${activeK1}"`);
                     }
+                    let isGenuineRegistered = !isGuestFallback && activeRegname && activeK1;
                     let displayNick = BOT_NICK || 'Szaby';
-                    if (activeRegname && activeK1) {
+                    if (isGenuineRegistered) {
                         displayNick = displayNick.endsWith('## ') ? displayNick : displayNick.trim() + '## ';
                         pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${(parseInt(fVal, 10) | 1) & ~64}"`);
                     } else {
                         displayNick = displayNick.replace(/##/g, '').trim();
-                        pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${parseInt(fVal, 10) & ~64}"`);
+                        pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${(parseInt(fVal, 10) & ~65)}"`);
                     }
                     pkt = pkt.replace(/n="[^"]*"/, `n="${displayNick}"`);
                     if (BOT_AVATAR) {
