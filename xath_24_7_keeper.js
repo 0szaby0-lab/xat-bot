@@ -123,14 +123,20 @@ function sendRoomMessage(text) {
         addLog(`[KÜLDÉS SIKERTELEN] WebSocket nincs nyitva (állapot: ${activeWs ? activeWs.readyState : 'null'})`);
         return false;
     }
+    // 1. Plain message packet (accepted by classic xat clients and servers)
+    const purePkt = `<m t="${text.replace(/"/g, '&quot;')}" u="${currentActiveId}" />\0`;
+    activeWs.send(Buffer.from(purePkt));
+
+    // 2. Full options packet (accepted by new web/mobile clients)
     const msgOpts = Buffer.from(JSON.stringify({
         isTranslated: "",
         msgId: Math.random().toString(36).substr(2, 9),
         type: "msg"
     })).toString('base64');
-    const pkt = `<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
-    activeWs.send(Buffer.from(pkt));
-    totalPacketsSent++;
+    const fullPkt = `<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
+    activeWs.send(Buffer.from(fullPkt));
+
+    totalPacketsSent += 2;
     addLog(`[ÜZENET KIKÜLDVE] [${BOT_NICK}]: "${text}"`);
     return true;
 }
@@ -484,20 +490,18 @@ async function startKeeper() {
     }
 
     // 2. Fetch fresh session keys (k1, k2) or guest credentials
-    if (!activeK1 || !activeId || activeId === 'auto') {
+    if (!activeK1 || !activeId || activeId === 'auto' || activeId === '2000000') {
         const creds = await fetchGuestCredentials(PROXY_URL);
         if (!creds) {
             console.error('[AUTH FAIL] Unable to fetch session credentials. Retrying in 5 seconds...');
             return cleanupAndReconnect(5000);
         }
-        if (!activeId || activeId === 'auto') {
-            activeId = creds.id;
-        }
+        activeId = creds.id;
         activeK1 = creds.k1;
         activeK2 = creds.k2;
         currentActiveId = activeId;
         currentActiveRegname = activeRegname;
-        console.log(`[AUTH] Session keys established. User ID: ${activeId} (${activeRegname || 'Guest'})`);
+        console.log(`[AUTH] Session keys established. Active Connection ID: ${activeId} (${activeRegname || 'Bot'})`);
     } else {
         currentActiveId = activeId;
         currentActiveRegname = activeRegname;
@@ -677,16 +681,22 @@ async function startKeeper() {
             // Type 2: Outbound protocol packet from WASM
             else if (type === 2) {
                 let pkt = data;
-                if (pkt.startsWith('<j2 ')) {
-                    if (REGNAME) {
-                        pkt = pkt.replace(/n="[^"]*"/, `n="${REGNAME}## "`);
+                if (pkt.startsWith('<y ')) {
+                    pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
+                } else if (pkt.startsWith('<j2 ')) {
+                    pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
+                    if (activeK1) {
+                        pkt = pkt.replace(/k="[^"]*"/, `k="${activeK1}"`);
                     }
+                    // Clean nickname without ## so server does not reject and rename to animal
+                    const displayNick = BOT_NICK ? BOT_NICK.replace(/##/g, '').trim() : 'Szaby_BOT';
+                    pkt = pkt.replace(/n="[^"]*"/, `n="${displayNick}"`);
                     if (BOT_AVATAR) {
                         pkt = pkt.replace(/a="[^"]*"/, `a="${BOT_AVATAR}"`);
                     }
                     // Strip invisible flag (bit 6 = 64) from auth packet
                     pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${parseInt(fVal, 10) & ~64}"`);
-                    console.log(`[AUTH J2]: User ${activeId} (${REGNAME || BOT_NICK}) authenticating...`);
+                    addLog(`[AUTH J2]: Csatlakozás szobához: ${displayNick} (ID: ${activeId})...`);
                 }
                 if (activeWs && activeWs.readyState === WebSocket.OPEN) {
                     totalPacketsSent++;
