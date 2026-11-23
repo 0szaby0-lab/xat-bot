@@ -147,7 +147,7 @@ let pingTimer = null;
 let hasGreeted = false;
 let reconnectTimer = null;
 
-let standbyEnabled = process.env.STANDBY === '1' || args.includes('--standby');
+let standbyEnabled = process.env.STANDBY !== '0';
 let isStandby = false;
 let lastUserHeartbeat = 0;
 let standbyCooldownUntil = 0;
@@ -161,7 +161,12 @@ function enterStandbyMode(reason) {
     const wasStandby = isStandby;
     isStandby = true;
     lastUserHeartbeat = Date.now();
-    standbyCooldownUntil = Date.now() + 120000; // 2 perc védelem ha nincs heartbeat
+    standbyCooldownUntil = Date.now() + 180000; // 3 perc védelem ha nincs aktív heartbeat
+
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
 
     if (!wasStandby) {
         addLog(`[STANDBY AKTIVÁLVA] Indok: ${reason}. A 24/7 keeper átadja a helyet a PC-nek.`);
@@ -644,7 +649,11 @@ function handleJson(raw) {
                 addLog(`[WS CLOSED] Code: ${code}, Reason: ${reasonStr}`);
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
-                scheduleReconnect();
+                if (code === 1008 || code === 4000 || reasonStr.toLowerCase().includes('dup') || reasonStr.toLowerCase().includes('another')) {
+                    enterStandbyMode(`Szerver zárási kód: ${code} (${reasonStr || 'Másik eszközről belépve'})`);
+                } else {
+                    scheduleReconnect();
+                }
             });
 
             activeWs.onerror = (err) => {
