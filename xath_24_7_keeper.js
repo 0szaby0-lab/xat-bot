@@ -139,10 +139,22 @@ function sendRoomMessage(text) {
         addLog(`[KÜLDÉS SIKERTELEN] WebSocket nincs nyitva (állapot: ${activeWs ? activeWs.readyState : 'null'})`);
         return false;
     }
-    // 1. Plain message packet (accepted by classic xat clients and servers)
+    // 1. Send via WASM engine (native client behavior)
+    if (currentModule) {
+        try {
+            SendC('xatCommand', '', JSON.stringify({
+                Type: 'Send',
+                Command: 'Send',
+                Page: 'messages',
+                Message: text,
+                msgId: Math.random().toString(36).substr(2, 9)
+            }));
+        } catch (_) {}
+    }
+    // 2. Plain message packet (accepted by classic xat clients and servers)
     sendPacket(`<m t="${text.replace(/"/g, '&quot;')}" u="${currentActiveId}" />`);
 
-    // 2. Full options packet (accepted by new web/mobile clients)
+    // 3. Full options packet (accepted by new web/mobile clients)
     const msgOpts = Buffer.from(JSON.stringify({
         isTranslated: "",
         msgId: Math.random().toString(36).substr(2, 9),
@@ -158,6 +170,17 @@ function sendRawCommand(cmd) {
     if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
         addLog(`[PARANCS SIKERTELEN] WebSocket nincs nyitva`);
         return false;
+    }
+    if (currentModule) {
+        try {
+            SendC('xatCommand', '', JSON.stringify({
+                Type: 'Send',
+                Command: 'Send',
+                Page: 'messages',
+                Message: cmd,
+                msgId: Math.random().toString(36).substr(2, 9)
+            }));
+        } catch (_) {}
     }
     // 1. Send pure command packet
     sendPacket(`<m t="${cmd.replace(/"/g, '&quot;')}" u="${currentActiveId}" />`);
@@ -175,11 +198,14 @@ function sendRawCommand(cmd) {
 }
 
 function disableInvisibleMode() {
-    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolási parancsok küldése: /-invisible és /u...`);
+    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolása folyamatban (/-invisible, /u, /-stealth)...`);
     sendRawCommand('/-invisible');
     setTimeout(() => {
         sendRawCommand('/u');
-    }, 1200);
+    }, 800);
+    setTimeout(() => {
+        sendRawCommand('/-stealth');
+    }, 1600);
     return true;
 }
 
@@ -625,7 +651,7 @@ async function startKeeper() {
         w_registered: activeRegname,
         DeviceId: activeDeviceId,
         PassHash: activePassHash,
-        w_cb: '0',
+        w_cb: (parsedTodo && parsedTodo.w_cb) ? parsedTodo.w_cb : '0',
         MobNo: ''
     };
 
@@ -637,6 +663,7 @@ async function startKeeper() {
         'todo': JSON.stringify(todoObject),
         'Macros': JSON.stringify({ Stealth: 'disable' }),
         'Settings': JSON.stringify({ Stealth: 'disable' }),
+        'w_Mask': JSON.stringify({ "0": 16777216 }),
         'w_Powers': JSON.stringify(powersObj)
     };
 
@@ -762,6 +789,19 @@ async function startKeeper() {
                             setTimeout(() => {
                                 sendRoomMessage(GREETING_MSG);
                             }, 4500);
+                        }
+                    }
+
+                    // Track room visitors
+                    if (str.includes('<u ')) {
+                        const uMatches = str.match(/<u [^>]+>/g) || [];
+                        for (const uPkt of uMatches) {
+                            const idMatch = uPkt.match(/\bu="(\d+)"/);
+                            const nMatch = uPkt.match(/\bn="([^"]+)"/);
+                            if (idMatch && nMatch) {
+                                seenUsers.set(idMatch[1], nMatch[1]);
+                                addLog(`[SZOBATAG]: ${nMatch[1]} (ID: ${idMatch[1]})`);
+                            }
                         }
                     }
 
