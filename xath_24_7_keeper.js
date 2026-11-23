@@ -158,12 +158,66 @@ function scheduleReconnect() {
     }, 4000);
 }
 
+const knownUsers = new Map();
+const lastInteraction = new Map();
+let lastTargetNick = '';
+
+const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
+const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
+
+function triggerRoomFallback(nick) {
+    if (!nick) return;
+    addLog(`[FALLBACK CHAT] Messaging @${nick} in main room...`);
+    SendC('xatCommand', '', JSON.stringify({
+        Type: 'Send',
+        Command: 'Send',
+        Page: 'messages',
+        Message: ROOM_FALLBACK_TEXT(nick),
+        msgId: Math.random().toString(36).substr(2, 9)
+    }));
+}
+
+function handleUserInteraction(senderId, text, isClick) {
+    const now = Date.now();
+    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 150000)) {
+        return; // debounce 2.5 min per user
+    }
+    lastInteraction.set(senderId, now);
+
+    const userObj = knownUsers.get(senderId);
+    const targetNick = userObj ? userObj.cleanNick : `User_${senderId}`;
+    lastTargetNick = targetNick;
+
+    addLog(`[INTERACTION] User ${targetNick} (${senderId}) clicked or messaged Szaby.`);
+
+    // If user is already identified as having friend-only lock
+    if (userObj && userObj.isFriendOnly) {
+        addLog(`[ZÁROLT PRIVÁT] ${targetNick} barát-záras, közös chatre válaszolunk...`);
+        setTimeout(() => triggerRoomFallback(targetNick), 800);
+        return;
+    }
+
+    // Try Private Message first
+    const opts = Buffer.from(JSON.stringify({
+        isTranslated: "",
+        msgId: Math.random().toString(36).substr(2, 9),
+        type: "msg"
+    })).toString('base64');
+
+    sendPacket(`<z d="${senderId}" t="/l" />`);
+    setTimeout(() => {
+        sendPacket(`<z d="${senderId}" u="${botId}_0" t="${PM_REPLY_TEXT}" o="${opts}" s="2" />`);
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
+    }, 400);
+}
+
 let activeWs = null;
 let joined = false;
 let myServerId = botId;
 let totalPacketsIn = 0;
 let totalPacketsOut = 0;
 const liveLogs = [];
+
 
 function addLog(line) {
     const ts = new Date().toLocaleTimeString();
@@ -275,6 +329,50 @@ function handleJson(raw) {
                 if (str.includes('<m t="/s"')) {
                     sendPacket('<m t="/s" u="0" />');
                 }
+
+                // Track all room users and their padlock status
+                if (str.includes('<u ')) {
+                    const uMatches = str.match(/<u [^>]+>/g) || [];
+                    for (const uPkt of uMatches) {
+                        const uMatch = uPkt.match(/\bu="(\d+)"/);
+                        const nMatch = uPkt.match(/\bn="([^"]*)"/);
+                        const fMatch = uPkt.match(/\bf="([^"]*)"/);
+                        if (uMatch) {
+                            const uid = uMatch[1];
+                            const rawNick = nMatch ? nMatch[1] : '';
+                            const cleanNick = rawNick.replace(/\([^)]*\)/g, '').replace(/_##.*$/, '').trim() || `User_${uid}`;
+                            const flag = fMatch ? parseInt(fMatch[1], 10) : 0;
+                            const isFriendOnly = (flag & 32) !== 0 || uPkt.includes('no-pc') || uPkt.includes('padlock');
+                            knownUsers.set(uid, { cleanNick, rawNick, isFriendOnly });
+                        }
+                    }
+                }
+
+                // Listen for clicks (<z ... t="/l"/>) and inbound PMs
+                if (str.includes('<z ') || str.includes('<p ')) {
+                    const pPackets = str.match(/<[pz] [^>]+>/g) || [];
+                    for (const pkt of pPackets) {
+                        const uMatch = pkt.match(/\bu="(\d+)"/);
+                        const dMatch = pkt.match(/\bd="(\d+)"/);
+                        const tMatch = pkt.match(/\bt="([^"]*)"/);
+                        const text = tMatch ? tMatch[1] : '';
+                        let senderId = uMatch ? uMatch[1] : null;
+
+                        if (dMatch && (dMatch[1] === botId || dMatch[1] === myServerId)) {
+                            if (senderId && senderId !== botId && senderId !== myServerId && senderId !== '0' && senderId !== '1' && senderId !== '10101' && senderId !== '30303') {
+                                handleUserInteraction(senderId, text, pkt.includes('t="/l"'));
+                            }
+                        }
+                    }
+                }
+
+                // Handle server rejection when recipient has PM locked (friend-only)
+                if (str.includes('Not added you as a friend') || str.includes('only accepts private messages from friends')) {
+                    if (lastTargetNick) {
+                        triggerRoomFallback(lastTargetNick);
+                    }
+                }
+
 
                 if (str.includes('<done') && !joined) {
                     joined = true;
