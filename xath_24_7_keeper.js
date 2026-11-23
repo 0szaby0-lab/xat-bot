@@ -165,12 +165,7 @@ function sendRawCommand(cmd) {
 }
 
 function disableInvisibleMode() {
-    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolási szekvencia indítása (${TARGET_ROOM})...`);
-    sendRawCommand('/-invisible');
-    sendRawCommand('/u');
-    setTimeout(() => {
-        sendRoomMessage('Sziasztok! Online vagyok :)');
-    }, 1200);
+    addLog(`[LÁTHATÓSÁG] Láthatósági állapot ellenőrizve (${TARGET_ROOM}): Invisible kikapcsolva (w_d0=0).`);
     return true;
 }
 
@@ -607,18 +602,16 @@ async function startKeeper() {
 
     // Build the exact 'todo' storage structure matching browser
     const todoObject = {
+        ...parsedTodo,
         w_userno: activeId,
         w_k1: activeK1,
         w_k2: activeK2,
         w_name: activeNick,
         w_avatar: activeAvatar,
-        w_homepage: parsedTodo.w_homepage || '',
-        w_sound: parsedTodo.w_sound || '',
-        w_powers: parsedTodo.w_powers || '',
-        w_userpowers: parsedTodo.w_userpowers || '',
         w_registered: activeRegname,
         DeviceId: activeDeviceId,
         PassHash: activePassHash,
+        w_d0: "0",
         MobNo: ''
     };
 
@@ -740,14 +733,15 @@ async function startKeeper() {
                     }
 
                     // Welcome message / joined room
-                    if ((str.includes('<done') || str.includes('<i ')) && !hasUnstealthed) {
+                    if (str.includes('<done') && !hasUnstealthed) {
                         hasUnstealthed = true;
+                        addLog(`[SZOBÁBAN] Sikeresen csatlakozva a szobához (${TARGET_ROOM})!`);
                         disableInvisibleMode();
 
                         if (GREETING_MSG) {
                             setTimeout(() => {
                                 sendRoomMessage(GREETING_MSG);
-                            }, 2500);
+                            }, 3000);
                         }
                     }
 
