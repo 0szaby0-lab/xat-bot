@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xath.hu Auto-Reply on Profile Click
 // @namespace    https://xath.hu/
-// @version      1.4.0
+// @version      1.5.0
 // @description  Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit
 // @match        *://xath.hu/*
 // @match        *://*.xath.hu/*
@@ -51,56 +51,137 @@
     const knownUsers = new Map();
     const userDeliveryState = new Map();
 
-    // 1. TIER KÜLDÉSI FÜGGVÉNYEK (SZIGORÚAN SZABVÁNYOS XAT CSOMAGOK)
-
-    function sendRawPacket(ws, xml) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // 1. NATÍV XAT KLIENS FÜGGVÉNYEK ÉS PRIVÁT KÜLDÉS
+    function findSendPm() {
         try {
-            const act = (typeof unsafeWindow !== 'undefined' ? unsafeWindow._Activity : window._Activity) ||
-                        (typeof parent !== 'undefined' && parent._Activity) ||
-                        (typeof window.top !== 'undefined' && window.top._Activity);
-            if (act && act.instance && typeof act.instance.SendSock === 'function') {
-                act.instance.SendSock(xml);
-                return;
+            if (typeof window.sendPm === 'function') return window.sendPm;
+            if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.sendPm === 'function') return unsafeWindow.sendPm;
+            if (window.parent && typeof window.parent.sendPm === 'function') return window.parent.sendPm;
+            if (window.top && typeof window.top.sendPm === 'function') return window.top.sendPm;
+            const embed = document.getElementById('embedframe');
+            if (embed && embed.contentWindow && typeof embed.contentWindow.sendPm === 'function') {
+                return embed.contentWindow.sendPm;
+            }
+            if (window.frames) {
+                for (let i = 0; i < window.frames.length; i++) {
+                    try {
+                        if (window.frames[i] && typeof window.frames[i].sendPm === 'function') {
+                            return window.frames[i].sendPm;
+                        }
+                    } catch (_) {}
+                }
             }
         } catch (_) {}
+        return null;
+    }
 
+    function findActivity() {
         try {
-            const bytes = new TextEncoder().encode(xml);
-            ws.send(bytes.buffer);
-        } catch (_) {
-            try { ws.send(xml); } catch (_) {}
+            if (window._Activity && window._Activity.instance) return window._Activity.instance;
+            if (typeof unsafeWindow !== 'undefined' && unsafeWindow._Activity && unsafeWindow._Activity.instance) return unsafeWindow._Activity.instance;
+            if (window.parent && window.parent._Activity && window.parent._Activity.instance) return window.parent._Activity.instance;
+            if (window.top && window.top._Activity && window.top._Activity.instance) return window.top._Activity.instance;
+            const embed = document.getElementById('embedframe');
+            if (embed && embed.contentWindow && embed.contentWindow._Activity && embed.contentWindow._Activity.instance) {
+                return embed.contentWindow._Activity.instance;
+            }
+            if (window.frames) {
+                for (let i = 0; i < window.frames.length; i++) {
+                    try {
+                        if (window.frames[i] && window.frames[i]._Activity && window.frames[i]._Activity.instance) {
+                            return window.frames[i]._Activity.instance;
+                        }
+                    } catch (_) {}
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    // Biztonságos privát üzenet küldése (Hivatalos xat mechanizmus, kizárva a kapcsolat bontását)
+    function sendPrivateReply(ws, senderId, targetNick) {
+        userDeliveryState.set(senderId, { nick: targetNick, tier: 1, time: Date.now() });
+
+        // 1. Natív sendPm hívás a beépített xat kliensben
+        const pmFn = findSendPm();
+        if (typeof pmFn === 'function') {
+            try {
+                pmFn(parseInt(senderId, 10), config.replyText);
+                console.log('[AUTO-REPLY] Natív sendPm sikeres:', targetNick, senderId);
+                return;
+            } catch (e) {
+                console.warn('[AUTO-REPLY] sendPm hiba:', e);
+            }
+        }
+
+        // 2. Natív WASM PrivateMessage az _Activity parancssoron keresztül
+        const act = findActivity();
+        if (act && typeof act.QueueCommand === 'function') {
+            try {
+                act.QueueCommand({
+                    Command: "Action",
+                    Message: config.replyText,
+                    Next: "messages",
+                    Page: "actions",
+                    Type: "Action",
+                    UserNo: parseInt(senderId, 10),
+                    name: "PrivateMessage"
+                });
+                console.log('[AUTO-REPLY] QueueCommand(PrivateMessage) sikeres:', targetNick, senderId);
+                return;
+            } catch (e) {
+                console.warn('[AUTO-REPLY] QueueCommand hiba:', e);
+            }
+        }
+
+        // 3. Közvetlen tiszta xat hálózati csomag küldése NUL byte nélkül
+        const pmXml = `<p u="${senderId}" t="${config.replyText}" />`;
+        if (act && typeof act.SendSock === 'function') {
+            try {
+                act.SendSock(pmXml);
+                console.log('[AUTO-REPLY] SendSock <p> sikeres:', targetNick, senderId);
+                return;
+            } catch (_) {}
+        }
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+                const bytes = new TextEncoder().encode(pmXml);
+                ws.send(bytes.buffer);
+                console.log('[AUTO-REPLY] ws.send binary <p> sikeres:', targetNick, senderId);
+            } catch (_) {}
         }
     }
 
-    // Tier 1: Privát csevegő fül (PC tab) - Elsődleges
-    function sendTier1PCTab(ws, senderId, nick) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
-
-        const myId = TARGET_USER_ID;
-        const msgId = Math.random().toString(36).substr(2, 9);
-        const opts = (typeof btoa !== 'undefined')
-            ? btoa(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" }))
-            : Buffer.from(JSON.stringify({ isTranslated: "", msgId: msgId, type: "msg" })).toString('base64');
-
-        // Küldés a privát csevegő fülbe natív SendSock / bináris ArrayBuffer formátumban NUL byte nélkül
-        sendRawPacket(ws, `<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />`);
-    }
-
-    // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
-    function sendTier2MainPadlock(ws, senderId, nick) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
-        sendRawPacket(ws, `<p u="${senderId}" t="${config.replyText}" />`);
-    }
-
-    // Tier 3: Fő chaten nyilvánosan (@Nick) - Fallback 2
+    // Nyilvános kiírás kizárólag ha a privát zárolt
     function sendTier3Public(ws, senderId, nick) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
         userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
         const pubMsg = `@${nick} ${config.fallbackText}`;
-        sendRawPacket(ws, `<m t="${pubMsg}" />`);
+
+        const act = findActivity();
+        if (act && typeof act.QueueCommand === 'function') {
+            try {
+                act.QueueCommand({
+                    Command: "Send",
+                    Message: pubMsg,
+                    Page: "messages",
+                    Type: "Send"
+                });
+                return;
+            } catch (_) {}
+        }
+        if (act && typeof act.SendSock === 'function') {
+            try {
+                act.SendSock(`<m t="${pubMsg}" />`);
+                return;
+            } catch (_) {}
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+                const bytes = new TextEncoder().encode(`<m t="${pubMsg}" />`);
+                ws.send(bytes.buffer);
+            } catch (_) {}
+        }
     }
 
     // Interakció kezelése és szigorú prioritási lépcső
@@ -124,9 +205,7 @@
         if (!targetNick || targetNick === 'User_' + senderId) targetNick = 'friend';
         lastTargetNick = targetNick;
 
-        const isGuest = parseInt(senderId, 10) > 4000000000;
-
-        console.log(`[AUTO-REPLY] Interakció: ${targetNick} (${senderId}, isGuest=${isGuest}, click=${isClick})`);
+        console.log(`[AUTO-REPLY] Interakció: ${targetNick} (${senderId}, click=${isClick})`);
 
         // 1. Ha Friends-Only zárolt: azonnal fő chat nyilvános
         if (userObj && userObj.isFriendOnly) {
@@ -134,17 +213,8 @@
             return;
         }
 
-        // 2. Ha vendég vagy NoPC tiltott (nem tud privát fület nyitni):
-        if (isGuest || (userObj && userObj.isNoPC)) {
-            sendTier2MainPadlock(ws, senderId, targetNick);
-            setTimeout(() => {
-                sendTier3Public(ws, senderId, targetNick);
-            }, 500);
-            return;
-        }
-
-        // 3. Fő ág: Szabályos privát fül nyitás és küldés
-        sendTier1PCTab(ws, senderId, targetNick);
+        // 2. Fő ág: Mindig privát üzenet küldése (nincs profil-kattintás szétbontás, nincs lakat előítélet)
+        sendPrivateReply(ws, senderId, targetNick);
     }
 
     // Bejövő szerver csomagok vizsgálata
@@ -209,24 +279,11 @@
                               str.includes('Not accepting private chat') ||
                               str.includes('nem fogad privát csevegést');
 
-        const isGeneralRejection = isFriendOnlyRejection ||
-                                   str.includes('cannot send private message') ||
-                                   str.includes('does not accept private') ||
-                                   str.includes('cannot private message') ||
-                                   str.includes('nem küldhető privát') ||
-                                   str.includes('blocked');
-
-        if ((isGeneralRejection || isPcRejection) && lastTargetId) {
+        if (isFriendOnlyRejection && lastTargetId) {
             const currentState = userDeliveryState.get(lastTargetId);
             const targetNick = lastTargetNick || (currentState ? currentState.nick : `User_${lastTargetId}`);
-
-            if (isFriendOnlyRejection) {
-                setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
-            } else if (currentState && currentState.tier === 1) {
-                setTimeout(() => sendTier2MainPadlock(ws, lastTargetId, targetNick), 250);
-            } else if (currentState && currentState.tier === 2) {
-                setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
-            }
+            console.log(`[AUTO-REPLY ESZKALÁCIÓ] ${targetNick} kizárólag barátoktól fogad privátot, nyilvános kiírás a fő chatre...`);
+            setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
         }
     }
 
