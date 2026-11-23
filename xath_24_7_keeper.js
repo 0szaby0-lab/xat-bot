@@ -56,14 +56,14 @@ if (rawTodo) {
 const EMAIL = process.env.EMAIL || process.env.XAT_EMAIL || fileConfig.email || getArg('email', '');
 const PASSWORD = process.env.PASSWORD || process.env.XAT_PASSWORD || fileConfig.password || getArg('password', '');
 const TARGET_ROOM = process.env.ROOM || fileConfig.room || getArg('room', 'xmradio');
-const USER_ID = process.env.USER_ID || fileConfig.userId || parsedTodo.w_userno || getArg('id', 'auto');
-const REGNAME = process.env.REGNAME || fileConfig.regname || parsedTodo.w_registered || getArg('regname', '');
-const K1 = process.env.K1 || fileConfig.k1 || parsedTodo.w_k1 || getArg('k1', '');
-const K2 = process.env.K2 || fileConfig.k2 || parsedTodo.w_k2 || getArg('k2', '');
-const DEVICE_ID = process.env.DEVICE_ID || fileConfig.deviceId || parsedTodo.DeviceId || getArg('deviceid', '');
-const PASS_HASH = process.env.PASS_HASH || fileConfig.passHash || parsedTodo.PassHash || getArg('passhash', '');
-const BOT_NICK = process.env.NICK || fileConfig.nick || parsedTodo.w_name || getArg('nick', REGNAME || 'Szaby');
-const BOT_AVATAR = process.env.AVATAR || fileConfig.avatar || parsedTodo.w_avatar || getArg('avatar', '100');
+let USER_ID = process.env.USER_ID || fileConfig.userId || parsedTodo.w_userno || getArg('id', 'auto');
+let REGNAME = process.env.REGNAME || fileConfig.regname || parsedTodo.w_registered || getArg('regname', '');
+let K1 = process.env.K1 || fileConfig.k1 || parsedTodo.w_k1 || getArg('k1', '');
+let K2 = process.env.K2 || fileConfig.k2 || parsedTodo.w_k2 || getArg('k2', '');
+let DEVICE_ID = process.env.DEVICE_ID || fileConfig.deviceId || parsedTodo.DeviceId || getArg('deviceid', '');
+let PASS_HASH = process.env.PASS_HASH || fileConfig.passHash || parsedTodo.PassHash || getArg('passhash', '');
+let BOT_NICK = process.env.NICK || fileConfig.nick || parsedTodo.w_name || getArg('nick', REGNAME || 'Szaby');
+let BOT_AVATAR = process.env.AVATAR || fileConfig.avatar || parsedTodo.w_avatar || getArg('avatar', '100');
 const PROXY_URL = process.env.PROXY || fileConfig.proxy || getArg('proxy', null);
 const HTTP_PORT = parseInt(process.env.PORT || fileConfig.port || getArg('port', '10000'), 10);
 const GREETING_MSG = process.env.GREETING || fileConfig.greeting || getArg('msg', 'Sziasztok!');
@@ -234,6 +234,73 @@ const server = http.createServer((req, res) => {
         }
     }
 
+    if (pathname === '/api/set-todo') {
+        let postBody = '';
+        req.on('data', chunk => postBody += chunk);
+        req.on('end', () => {
+            let dataStr = parsedUrl.searchParams.get('data') || postBody;
+            try {
+                if (postBody && (postBody.trim().startsWith('{') || postBody.trim().startsWith('"'))) {
+                    const parsed = JSON.parse(postBody);
+                    if (parsed.data) dataStr = parsed.data;
+                }
+            } catch (_) {}
+
+            if (!dataStr) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: false, error: 'Hiányzó todo beviteli adat!' }));
+            }
+
+            try {
+                let parsedObj = typeof dataStr === 'string' ? JSON.parse(dataStr) : dataStr;
+                if (parsedObj.todo) parsedObj = parsedObj.todo;
+
+                if (parsedObj.w_userno) USER_ID = String(parsedObj.w_userno);
+                if (parsedObj.w_k1) K1 = String(parsedObj.w_k1);
+                if (parsedObj.w_k2) K2 = String(parsedObj.w_k2);
+                if (parsedObj.w_registered) REGNAME = String(parsedObj.w_registered);
+                if (parsedObj.DeviceId) DEVICE_ID = String(parsedObj.DeviceId);
+                if (parsedObj.PassHash) PASS_HASH = String(parsedObj.PassHash);
+                if (parsedObj.w_name) BOT_NICK = String(parsedObj.w_name);
+                if (parsedObj.w_avatar) BOT_AVATAR = String(parsedObj.w_avatar);
+
+                parsedTodo = parsedObj;
+
+                fileConfig.todo = parsedObj;
+                fileConfig.userId = USER_ID;
+                fileConfig.k1 = K1;
+                fileConfig.k2 = K2;
+                fileConfig.regname = REGNAME;
+                fileConfig.deviceId = DEVICE_ID;
+                fileConfig.passHash = PASS_HASH;
+                fileConfig.nick = BOT_NICK;
+                fileConfig.avatar = BOT_AVATAR;
+
+                try {
+                    fs.writeFileSync(CONFIG_FILE, JSON.stringify(fileConfig, null, 2), 'utf8');
+                } catch (fsErr) {
+                    console.error('[CONFIG SAVE ERR]:', fsErr.message);
+                }
+
+                currentActiveId = USER_ID;
+                currentActiveRegname = REGNAME;
+
+                addLog(`[FIÓK MENTVE] Sikeres fiókfrissítés! Regisztrált felhasználó: ${REGNAME || 'Szaby'} (ID: ${USER_ID})`);
+                cleanupAndReconnect(500);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                    success: true,
+                    message: `Sikeres beállítás! Csatlakozás a regisztrált fiókkal (${REGNAME || 'Szaby'}, ID: ${USER_ID})...`
+                }));
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: false, error: 'Hiba a JSON feldolgozásakor: ' + err.message }));
+            }
+        });
+        return;
+    }
+
     const uptimeHrs = ((Date.now() - startTime) / 3600000).toFixed(2);
     const html = `<!DOCTYPE html>
 <html lang="hu">
@@ -301,6 +368,13 @@ const server = http.createServer((req, res) => {
         </form>
         <div id="toast"></div>
 
+        <h2>🔑 Valódi Regisztrált Fiók Bekötése (todo JSON)</h2>
+        <p style="font-size:13px; color:#8b949e; margin-bottom:8px;">Ha a szobában a bot csak sima tagként jelenik meg, illeszd be ide a böngésződből a <code>localStorage.getItem('todo')</code> adataidat, hogy a VALÓDI regisztrált rangoddal lépjen be:</p>
+        <textarea id="todoInput" rows="3" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; border-radius:6px; padding:8px; font-family:monospace; font-size:12px; outline:none;" placeholder='{"w_userno":"1999928669","w_registered":"Szaby","w_k1":"...","w_k2":"...","PassHash":"..."}'></textarea>
+        <div style="margin-top:8px; margin-bottom:14px; display:flex; gap:8px;">
+            <button type="button" class="btn btn-success" onclick="saveTodoData()">💾 Fiók Mentése & Csatlakozás</button>
+        </div>
+
         <h2>📜 Élő Esemény & Chat Napló</h2>
         <div id="logBox">Napló betöltése...</div>
 
@@ -330,6 +404,26 @@ const server = http.createServer((req, res) => {
             if (!val) return;
             triggerAction('/api/send?msg=' + encodeURIComponent(val), 'Elküldve: ' + val);
             inp.value = '';
+        }
+
+        function saveTodoData() {
+            const val = document.getElementById('todoInput').value.trim();
+            if (!val) return alert('Kérlek illeszd be a todo JSON adatot!');
+            const toast = document.getElementById('toast');
+            toast.innerText = 'Mentés és bejelentkezés folyamatban...';
+            fetch('/api/set-todo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data: val })
+            })
+            .then(r => r.json())
+            .then(d => {
+                toast.innerText = d.success ? '✅ ' + d.message : '❌ ' + d.error;
+                setTimeout(() => location.reload(), 2500);
+            })
+            .catch(e => {
+                toast.innerText = '❌ Hiba: ' + e.message;
+            });
         }
 
         function refreshLogs() {
@@ -490,7 +584,7 @@ async function startKeeper() {
     }
 
     // 2. Fetch fresh session keys (k1, k2) or guest credentials
-    if (!activeK1 || !activeId || activeId === 'auto' || activeId === '2000000') {
+    if (!activeK1 || !activeId || activeId === 'auto') {
         const creds = await fetchGuestCredentials(PROXY_URL);
         if (!creds) {
             console.error('[AUTH FAIL] Unable to fetch session credentials. Retrying in 5 seconds...');
@@ -688,15 +782,19 @@ async function startKeeper() {
                     if (activeK1) {
                         pkt = pkt.replace(/k="[^"]*"/, `k="${activeK1}"`);
                     }
-                    // Clean nickname without ## so server does not reject and rename to animal
-                    const displayNick = BOT_NICK ? BOT_NICK.replace(/##/g, '').trim() : 'Szaby_BOT';
+                    let displayNick = BOT_NICK || 'Szaby';
+                    if (activeRegname && activeK1) {
+                        displayNick = displayNick.endsWith('## ') ? displayNick : displayNick.trim() + '## ';
+                        pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${(parseInt(fVal, 10) | 1) & ~64}"`);
+                    } else {
+                        displayNick = displayNick.replace(/##/g, '').trim();
+                        pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${parseInt(fVal, 10) & ~64}"`);
+                    }
                     pkt = pkt.replace(/n="[^"]*"/, `n="${displayNick}"`);
                     if (BOT_AVATAR) {
                         pkt = pkt.replace(/a="[^"]*"/, `a="${BOT_AVATAR}"`);
                     }
-                    // Strip invisible flag (bit 6 = 64) from auth packet
-                    pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${parseInt(fVal, 10) & ~64}"`);
-                    addLog(`[AUTH J2]: Csatlakozás szobához: ${displayNick} (ID: ${activeId})...`);
+                    addLog(`[AUTH J2]: Csatlakozás szobához: ${displayNick} (ID: ${activeId}, Regisztrált: ${activeRegname || 'nem'})...`);
                 }
                 if (activeWs && activeWs.readyState === WebSocket.OPEN) {
                     totalPacketsSent++;
