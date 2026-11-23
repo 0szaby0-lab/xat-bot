@@ -196,6 +196,8 @@ const server = http.createServer((req, res) => {
             bot: BOT_NICK,
             userId: currentActiveId,
             registeredName: currentActiveRegname,
+            hasK1: !!K1,
+            k1Len: K1 ? K1.length : 0,
             reconnects: reconnectAttempts
         }));
     }
@@ -721,16 +723,18 @@ async function startKeeper() {
 
                     // Detect disconnect / duplicate kick
                     if (str.includes('<logout')) {
-                        console.warn(`[KICK/LOGOUT] Server returned logout: ${str.replace(/\0/g, ' ')}`);
+                        addLog(`[KILÉPTETÉS / HIBA]: ${str.replace(/\0/g, ' ')}`);
                         if (str.includes('e="dup"')) {
-                            console.warn('[NOTICE] Account logged in from another location (dup). Waiting 10s to reclaim session...');
+                            addLog('[ÉRTESÍTÉS] Fiók megnyitva másik böngészőben (dup)! Várakozás 10 másodpercig...');
                             cleanupAndReconnect(10000);
                             return;
                         } else if (str.includes('e="E43"')) {
-                            console.warn('[NOTICE] Session key expired (E43). Re-fetching fresh session credentials...');
+                            addLog('[ÉRTESÍTÉS] Lejárt munkamenet kulcs (E43). Újracsatlakozás...');
                             cleanupAndReconnect(3000);
                             return;
                         }
+                    } else if (str.includes('<y ') || str.includes('<done') || str.includes('<i ')) {
+                        addLog(`[SZERVER CSOMAG]: ${str.replace(/\0/g, ' ').slice(0, 80)}`);
                     }
 
                     // Welcome message / joined room
@@ -763,12 +767,12 @@ async function startKeeper() {
                 });
 
                 activeWs.on('close', (code, reason) => {
-                    console.warn(`[WS CLOSED] Connection dropped (code: ${code}, reason: ${reason || 'none'}). Reconnecting...`);
+                    addLog(`[WS LEZÁRULT] Kód: ${code}, Ok: ${reason || 'nincs'}. Újracsatlakozás 3s múlva...`);
                     cleanupAndReconnect(3000);
                 });
 
                 activeWs.on('error', (err) => {
-                    console.error('[WS ERROR]:', err.message);
+                    addLog(`[WS HIBA]: ${err.message}`);
                     cleanupAndReconnect(4000);
                 });
             }
