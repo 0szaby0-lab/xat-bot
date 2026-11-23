@@ -13,14 +13,26 @@ function getArg(name, def) {
     return idx !== -1 && args[idx + 1] ? args[idx + 1] : def;
 }
 
-const roomName = getArg('room', 'xmradio');
-const botNick = getArg('nick', 'Bence');
-const botAvatar = getArg('avatar', '100');
-let botId = getArg('id', null);
-let botK1 = getArg('k1', null);
-let botK2 = getArg('k2', null);
+const configFile = getArg('config', 'account_config.json');
+let fileCfg = {};
+if (configFile && fs.existsSync(path.resolve(__dirname, configFile))) {
+    try {
+        fileCfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, configFile), 'utf8'));
+    } catch (_) {}
+}
+
+const roomName = getArg('room', fileCfg.room || 'xmradio');
+const botNick = getArg('nick', fileCfg.nick || 'Szaby');
+const botAvatar = getArg('avatar', fileCfg.avatar || '753');
+let botId = getArg('id', fileCfg.userId || (fileCfg.todo && fileCfg.todo.w_userno) || null);
+let botK1 = getArg('k1', fileCfg.k1 || (fileCfg.todo && fileCfg.todo.w_k1) || null);
+let botK2 = getArg('k2', fileCfg.k2 || (fileCfg.todo && fileCfg.todo.w_k2) || null);
+let botRegname = getArg('regname', fileCfg.regname || (fileCfg.todo && fileCfg.todo.w_registered) || (botId ? botNick : null));
+let botDeviceId = getArg('deviceid', fileCfg.deviceId || (fileCfg.todo && fileCfg.todo.DeviceId) || '');
+let botPassHash = getArg('passhash', fileCfg.passHash || (fileCfg.todo && fileCfg.todo.PassHash) || '');
+
 const IS_SILENT = args.includes('--silent') || args.includes('--no-chat') || args.includes('--no-msg');
-const initialMsg = IS_SILENT ? '' : getArg('msg', 'sziasztok mindenkinek :)');
+const initialMsg = IS_SILENT ? '' : getArg('msg', fileCfg.greeting || 'sziasztok mindenkinek :)');
 const STAY_SECONDS = parseInt(getArg('stay', '0'), 10);
 const CHAT_INTERVAL = IS_SILENT ? 0 : parseInt(getArg('chat-interval', '60'), 10);
 const rawProxy = getArg('proxy', null);
@@ -65,16 +77,33 @@ function normalizeProxy(s) {
     }
     return `http://${s}`;
 }
+
 const PROXY_URL = normalizeProxy(rawProxy);
 
-const todoObj = {
+let todoObj = {
     w_userno: botId,
     w_k1: botK1,
     w_k2: botK2,
     w_name: botNick,
     w_avatar: String(botAvatar),
+    w_registered: botRegname || (botId ? botNick : ''),
+    DeviceId: botDeviceId,
+    PassHash: botPassHash,
     w_userrev: 1
 };
+
+if (fileCfg.todo && typeof fileCfg.todo === 'object') {
+    todoObj = Object.assign({}, fileCfg.todo, todoObj);
+    todoObj.w_PowerO = '';
+    todoObj.w_registered = botRegname || fileCfg.todo.w_registered || botNick;
+    if (botId) todoObj.w_userno = botId;
+    if (botK1) todoObj.w_k1 = botK1;
+    if (botK2) todoObj.w_k2 = botK2;
+    if (botNick) todoObj.w_name = botNick;
+    if (botAvatar) todoObj.w_avatar = String(botAvatar);
+    if (botDeviceId) todoObj.DeviceId = botDeviceId;
+    if (botPassHash) todoObj.PassHash = botPassHash;
+}
 
 const store = {
     'mobCookies': '1',
@@ -263,9 +292,7 @@ function handleJson(raw) {
             activeWs.on('message', (eventData) => {
                 const buf = Buffer.from(eventData);
                 const str = buf.toString('utf8');
-                if (str.includes('<p ') || str.includes('<z ') || str.includes('<logout') || str.includes('e=')) {
-                    console.log('[RAW RECV PC/ERR]:', str);
-                }
+                console.log('[RAW RECV]:', str);
 
                 // Track our own assigned user ID
                 if (str.includes(botNick)) {
@@ -296,7 +323,10 @@ function handleJson(raw) {
                             }
                         }
 
-                        if (senderId && senderId !== botId && senderId !== myServerId && senderId !== '0') {
+                        const tMatch = pkt.match(/\bt="([^"]*)"/);
+                        const msgText = tMatch ? tMatch[1] : '';
+
+                        if (!IS_SILENT && senderId && senderId !== botId && senderId !== myServerId && senderId !== '0' && senderId !== '1' && !msgText.startsWith('/')) {
                             const replyDelay = Math.floor(400 + Math.random() * 500);
                             setTimeout(() => {
                                 const reply = PM_REPLIES[Math.floor(Math.random() * PM_REPLIES.length)];
@@ -354,7 +384,7 @@ function handleJson(raw) {
                             const uId = idMatch[1];
                             if (uId !== botId && uId !== myServerId && uId !== '0' && !BOT_IDS.has(uId)) {
                                 roomUsers.add(uId);
-                                if (joined && !messagedUsers.has(uId)) {
+                                if (!IS_SILENT && joined && !messagedUsers.has(uId)) {
                                     const delay = Math.floor(1500 + Math.random() * 3000);
                                     setTimeout(() => {
                                         initiatePrivateChat(uId);
@@ -376,6 +406,17 @@ function handleJson(raw) {
                     setTimeout(() => {
                         sendPacket(`<x i="418" n="${botNick}" a="${botAvatar}" />`);
                     }, 500);
+
+                    setTimeout(() => {
+                        console.log('[VISIBILITY] Breaking invisible mode via normal greeting in main room...');
+                        SendC('xatCommand', '', JSON.stringify({
+                            Type: 'Send',
+                            Command: 'Send',
+                            Page: 'messages',
+                            Message: 'Sziasztok :)',
+                            msgId: Math.random().toString(36).substr(2, 9)
+                        }));
+                    }, 1500);
 
                     // Proactively message all real room visitors
                     if (!IS_SILENT) {
@@ -434,13 +475,53 @@ function handleJson(raw) {
                     }
                 }
 
+                // Capture <v ...> updates from server (re-login or power update)
+                if (str.includes('<v ')) {
+                    const vMatch = str.match(/<v ([^>]+)>/);
+                    if (vMatch) {
+                        const attrs = vMatch[1].match(/(\w+)="([^"]*)"/g) || [];
+                        for (const attr of attrs) {
+                            const [k, v] = attr.split('="');
+                            const val = v.slice(0, -1);
+                            if (k.startsWith('d') && !isNaN(parseInt(k.slice(1), 10))) {
+                                todoObj['w_' + k] = val;
+                            } else if (k === 'k1') {
+                                todoObj.w_k1 = val;
+                                botK1 = val;
+                            } else if (k === 'k2') {
+                                todoObj.w_k2 = val;
+                                botK2 = val;
+                            } else if (k === 'k3') {
+                                todoObj.w_k3 = val;
+                            }
+                        }
+                        todoObj.w_PowerO = '';
+                        store['todo'] = JSON.stringify(todoObj);
+                        try {
+                            fileCfg.todo = todoObj;
+                            fs.writeFileSync(path.resolve(__dirname, configFile), JSON.stringify(fileCfg, null, 2));
+                        } catch (_) {}
+                        console.log('[UPDATED TODO FROM <v> PACKET]: saved power masks to account_config.json');
+                    }
+                }
+
                 SendC('xatMessageReceived', '#MESSAGE', buf.toString('base64'));
             });
 
             activeWs.on('close', (code, reason) => {
                 console.log('[WS CLOSED]', code, reason ? reason.toString() : '');
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
-                process.exit(0);
+                if (joined) {
+                    console.log('[SESSION ENDED] Exiting cleanly for supervisor restart...');
+                    process.exit(0);
+                } else {
+                    setTimeout(() => {
+                        if (!activeWs || activeWs.readyState === WebSocket.CLOSED) {
+                            console.log('[RECONNECTING AFTER CLOSE]...');
+                            SendC('leaveBackground', '', roomName);
+                        }
+                    }, 1000);
+                }
             });
 
             activeWs.onerror = (err) => {};
@@ -450,8 +531,10 @@ function handleJson(raw) {
             if (data.includes('Not added you as a friend')) {
                 return;
             }
-            console.log('[OUT 2]:', data);
-            sendPacket(Buffer.from(data));
+            console.log('[WASM ORIGINAL 2]:', data);
+            let outData = data;
+            console.log('[OUT 2]:', outData);
+            sendPacket(Buffer.from(outData));
         }
     } catch (_) {}
 }

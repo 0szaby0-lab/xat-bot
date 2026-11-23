@@ -6,8 +6,10 @@ const ws = new WebSocket('wss://wss.xath.hu:443/v2', {
 });
 
 ws.on('open', () => {
+    console.log('[PROBE OPEN]');
     ws.send(Buffer.from('<y r="418" v="0" u="0" />\0'));
 });
+ws.on('error', (e) => console.log('[PROBE ERR]', e));
 
 ws.on('message', (d) => {
     const s = d.toString('utf8');
