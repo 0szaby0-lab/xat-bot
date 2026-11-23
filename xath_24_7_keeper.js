@@ -198,16 +198,11 @@ function sendRawCommand(cmd) {
 }
 
 function disableInvisibleMode() {
-    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolása folyamatban (/-invisible, /u, /-stealth)...`);
-    sendRawCommand('/-invisible');
-    setTimeout(() => {
-        sendRawCommand('/u');
-    }, 800);
-    setTimeout(() => {
-        sendRawCommand('/-stealth');
-    }, 1600);
+    addLog(`[LÁTHATÓSÁG] Láthatóság aktiválása normál szobaüzenettel (smile)...`);
+    sendRoomMessage('Sziasztok :)');
     return true;
 }
+
 
 // --- HTTP Server for Render Healthcheck, Live Dashboard & Remote Control ---
 const server = http.createServer((req, res) => {
@@ -641,19 +636,34 @@ async function startKeeper() {
     }
 
     // Build clean storage structure matching xath_guest_runner
-    const todoObject = {
+    let todoObject = {
         w_userno: activeId,
         w_k1: activeK1,
         w_k2: activeK2,
         w_name: activeNick,
         w_avatar: String(activeAvatar),
-        w_registered: activeRegname,
+        w_registered: activeRegname || (activeId ? activeNick : ''),
+        DeviceId: activeDeviceId,
+        PassHash: activePassHash,
         w_userrev: 1
     };
+
+    if (fileConfig.todo && typeof fileConfig.todo === 'object') {
+        todoObject = Object.assign({}, fileConfig.todo, todoObject);
+        todoObject.w_PowerO = '';
+        if (activeId) todoObject.w_userno = activeId;
+        if (activeK1) todoObject.w_k1 = activeK1;
+        if (activeK2) todoObject.w_k2 = activeK2;
+        if (activeNick) todoObject.w_name = activeNick;
+        if (activeAvatar) todoObject.w_avatar = String(activeAvatar);
+        if (activeDeviceId) todoObject.DeviceId = activeDeviceId;
+        if (activePassHash) todoObject.PassHash = activePassHash;
+    }
 
     const storage = {
         'mobCookies': '1',
         'todo': JSON.stringify(todoObject),
+
         'Settings': JSON.stringify({
             name: activeNick,
             avatar: String(activeAvatar),
@@ -809,6 +819,36 @@ async function startKeeper() {
                         }
                     }
 
+                    // Capture <v ...> updates from server (re-login or power update)
+                    if (str.includes('<v ')) {
+                        const vMatch = str.match(/<v ([^>]+)>/);
+                        if (vMatch) {
+                            const attrs = vMatch[1].match(/(\w+)="([^"]*)"/g) || [];
+                            for (const attr of attrs) {
+                                const [k, v] = attr.split('="');
+                                const val = v.slice(0, -1);
+                                if (k.startsWith('d') && !isNaN(parseInt(k.slice(1), 10))) {
+                                    todoObject['w_' + k] = val;
+                                } else if (k === 'k1') {
+                                    todoObject.w_k1 = val;
+                                    activeK1 = val;
+                                } else if (k === 'k2') {
+                                    todoObject.w_k2 = val;
+                                    activeK2 = val;
+                                } else if (k === 'k3') {
+                                    todoObject.w_k3 = val;
+                                }
+                            }
+                            todoObject.w_PowerO = '';
+                            storage['todo'] = JSON.stringify(todoObject);
+                            try {
+                                fileConfig.todo = todoObject;
+                                fs.writeFileSync(CONFIG_FILE, JSON.stringify(fileConfig, null, 2));
+                            } catch (_) {}
+                            addLog('[SZERVER FRISSÍTÉS] Power maszkok elmentve a konfigurációba.');
+                        }
+                    }
+
                     // Auto-reply to Private Chats (PMs)
                     if (AUTO_REPLY && (str.includes('<p ') || str.includes('<z '))) {
                         handleIncomingPrivateMessage(str, activeId);
@@ -816,6 +856,7 @@ async function startKeeper() {
 
                     SendC('xatMessageReceived', '#MESSAGE', buf.toString('base64'));
                 });
+
 
                 activeWs.on('close', (code, reason) => {
                     addLog(`[WS LEZÁRULT] Kód: ${code}, Ok: ${reason || 'nincs'}. Újracsatlakozás 3s múlva...`);
