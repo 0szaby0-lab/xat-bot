@@ -611,7 +611,6 @@ async function startKeeper() {
         w_registered: activeRegname,
         DeviceId: activeDeviceId,
         PassHash: activePassHash,
-        w_d0: "0",
         MobNo: ''
     };
 
@@ -778,9 +777,16 @@ async function startKeeper() {
                 if (pkt.startsWith('<y ')) {
                     pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
                 } else if (pkt.startsWith('<j2 ')) {
+                    addLog(`[WASM NYERS J2]: ${pkt.replace(/\0/g, ' ')}`);
                     pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
                     if (activeK1) {
                         pkt = pkt.replace(/k="[^"]*"/, `k="${activeK1}"`);
+                    }
+                    if (parsedTodo && parsedTodo.w_k3) {
+                        pkt = pkt.replace(/k3="[^"]*"/, `k3="${parsedTodo.w_k3}"`);
+                    }
+                    if (parsedTodo && parsedTodo.w_d0 && !pkt.includes('d0=')) {
+                        pkt = pkt.replace(/<j2 /, `<j2 d0="${parsedTodo.w_d0}" d1="${parsedTodo.w_d1 || 0}" d3="${parsedTodo.w_d3 || 0}" `);
                     }
                     let isGenuineRegistered = !isGuestFallback && activeRegname && activeK1;
                     let displayNick = BOT_NICK || 'Szaby';
@@ -795,7 +801,7 @@ async function startKeeper() {
                     if (BOT_AVATAR) {
                         pkt = pkt.replace(/a="[^"]*"/, `a="${BOT_AVATAR}"`);
                     }
-                    addLog(`[AUTH J2]: Csatlakozás szobához: ${displayNick} (ID: ${activeId}, Regisztrált: ${activeRegname || 'nem'})...`);
+                    addLog(`[KIKÜLDÖTT J2]: ${pkt.replace(/\0/g, ' ')}`);
                 }
                 if (activeWs && activeWs.readyState === WebSocket.OPEN) {
                     totalPacketsSent++;
