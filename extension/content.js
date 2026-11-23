@@ -340,18 +340,51 @@
     // és amikor bezárod a lapot/böngészőt, a Render automatikusan visszatér 24/7 módba!
     const KEEPER_URL = 'https://xat-bot-qziz.onrender.com';
 
+    function callKeeper(type, data = null) {
+        // 1. Chrome kiterjesztés Service Worker (teljesen megkerüli az oldal CSP-jét)
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            try {
+                chrome.runtime.sendMessage({ type, data }, () => {});
+                return;
+            } catch (_) {}
+        }
+
+        // 2. Tampermonkey / Violentmonkey (GM_xmlhttpRequest megkerüli a CSP-t)
+        if (typeof GM_xmlhttpRequest !== 'undefined') {
+            const endpoints = {
+                'SYNC_SESSION': '/api/sync-session',
+                'USER_ACTIVE': '/user-active',
+                'USER_INACTIVE': '/user-inactive'
+            };
+            try {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: `${KEEPER_URL}${endpoints[type] || '/user-active'}`,
+                    headers: { 'Content-Type': 'application/json' },
+                    data: JSON.stringify(data || {})
+                });
+                return;
+            } catch (_) {}
+        }
+
+        // 3. Közvetlen fetch fallback
+        try {
+            const path = type === 'SYNC_SESSION' ? '/api/sync-session' : (type === 'USER_INACTIVE' ? '/user-inactive' : '/user-active');
+            fetch(`${KEEPER_URL}${path}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data || {})
+            }).catch(() => {});
+        } catch (_) {}
+    }
+
     function syncKeeperSession() {
         try {
             const rawTodo = localStorage.getItem('todo');
             if (!rawTodo) return;
             const todoData = JSON.parse(rawTodo);
             if (!todoData || !todoData.PassHash || String(todoData.w_userno || '') !== '2000000') return;
-
-            fetch(`${KEEPER_URL}/api/sync-session`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user: 'Szaby', todo: todoData })
-            }).catch(() => {});
+            callKeeper('SYNC_SESSION', { user: 'Szaby', todo: todoData });
         } catch (_) {}
     }
 
@@ -359,23 +392,11 @@
         if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
             return;
         }
-        try {
-            fetch(`${KEEPER_URL}/user-active?user=Szaby`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user: 'Szaby' })
-            }).catch(() => {});
-        } catch (_) {}
+        callKeeper('USER_ACTIVE', { user: 'Szaby' });
     }
 
     function sendKeeperExit() {
-        try {
-            if (navigator.sendBeacon) {
-                navigator.sendBeacon(`${KEEPER_URL}/user-inactive?user=Szaby`);
-            } else {
-                fetch(`${KEEPER_URL}/user-inactive?user=Szaby`, { method: 'POST', mode: 'no-cors' }).catch(() => {});
-            }
-        } catch (_) {}
+        callKeeper('USER_INACTIVE', { user: 'Szaby' });
     }
 
     // Oldal betöltésekor automatikusan szinkronizáljuk a munkamenet kulcsokat

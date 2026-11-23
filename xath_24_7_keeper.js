@@ -736,15 +736,15 @@ const srv = http.createServer((req, res) => {
         return;
     }
 
-    if (url.pathname === '/user-active') {
-        let body = '';
-        req.on('data', chunk => { body += chunk; });
-        req.on('end', () => {
-            enterStandbyMode('PC böngésző aktív a csevegőben');
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: isStandby }));
-        });
-        return;
+    if (url.pathname === '/user-active' || url.pathname === '/yield') {
+        enterStandbyMode('PC böngésző / felhasználó kérése');
+        const accept = req.headers['accept'] || '';
+        if (req.method === 'GET' && !accept.includes('application/json')) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            return res.end('<!DOCTYPE html><html><body style="background:#0d1117;color:#58a6ff;font-family:sans-serif;text-align:center;padding:50px;"><h2>Standby aktív! A 24/7 bot átadta a helyet a gépednek.</h2><p style="color:#c9d1d9;">Most már nyugodtan cseveghetsz a gépedről. Ha bezárod a lapot, a bot automatikusan visszalép.</p></body></html>');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: isStandby }));
     }
 
     if (url.pathname === '/user-inactive') {
