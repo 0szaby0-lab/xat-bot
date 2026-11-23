@@ -63,7 +63,7 @@ let todoObj = {
 };
 
 if (fileCfg.todo && typeof fileCfg.todo === 'object') {
-    todoObj = Object.assign({}, fileCfg.todo, todoObj);
+    todoObj = Object.assign({}, todoObj, fileCfg.todo);
     todoObj.w_PowerO = '';
     todoObj.w_registered = botRegname || fileCfg.todo.w_registered || botNick;
     if (botId) todoObj.w_userno = botId;
@@ -73,6 +73,7 @@ if (fileCfg.todo && typeof fileCfg.todo === 'object') {
     if (botAvatar) todoObj.w_avatar = String(botAvatar);
     if (botDeviceId) todoObj.DeviceId = botDeviceId;
     if (botPassHash) todoObj.PassHash = botPassHash;
+    if (fileCfg.todo.w_userrev !== undefined) todoObj.w_userrev = fileCfg.todo.w_userrev;
 }
 
 const store = {
@@ -366,7 +367,7 @@ const liveLogs = [];
 function addLog(line) {
     const ts = new Date().toLocaleTimeString();
     liveLogs.push(`[${ts}] ${line}`);
-    if (liveLogs.length > 50) liveLogs.shift();
+    if (liveLogs.length > 200) liveLogs.shift();
     console.log(line);
 }
 
@@ -374,7 +375,7 @@ function sendPacket(pkt) {
     if (!pkt || !activeWs || activeWs.readyState !== WebSocket.OPEN) return;
     totalPacketsOut++;
     const s = typeof pkt === 'string' ? pkt : pkt.toString();
-    addLog('[RAW SEND]: ' + s.slice(0, 80));
+    addLog('[RAW SEND]: ' + s.slice(0, 500));
     if (typeof pkt === 'string') {
         if (!pkt.endsWith('\0')) pkt += '\0';
         activeWs.send(Buffer.from(pkt));
@@ -466,7 +467,7 @@ function handleJson(raw) {
                 totalPacketsIn++;
                 const buf = Buffer.from(eventData);
                 const str = buf.toString('utf8');
-                addLog('[RAW RECV]: ' + str.slice(0, 80));
+                addLog('[RAW RECV]: ' + str.slice(0, 500));
 
                 if (str.includes(botNick)) {
                     const idMatch = str.match(new RegExp(`<u [^>]*u="(\\d+)"[^>]*n="${botNick}`, 'i')) ||
@@ -690,7 +691,16 @@ const srv = http.createServer((req, res) => {
             }
 
             if (receivedTodo) {
-                addLog(`[SESSION SYNC] Új hitelesítési munkamenet érkezett a böngészőből (User: ${receivedTodo.w_name || receivedTodo.w_userno || botNick})!`);
+                const isSzaby = String(receivedTodo.w_userno || receivedTodo.UserId || '') === '2000000' ||
+                                String(receivedTodo.w_name || '') === 'Szaby' ||
+                                String(receivedTodo.w_registered || '') === 'Szaby';
+                if (!isSzaby || !receivedTodo.PassHash) {
+                    addLog(`[SESSION SYNC ELDOBVA] Nem Szaby bejelentkezett munkamenet (User: ${receivedTodo.w_name || receivedTodo.w_userno}, PassHash: ${receivedTodo.PassHash ? 'van' : 'nincs'})`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ status: 'ignored', ok: false }));
+                }
+
+                addLog(`[SESSION SYNC ELFOGADVA] Új hitelesítés Szaby részére (cb: ${receivedTodo.w_cb}, dt: ${receivedTodo.w_dt})!`);
                 todoObj = Object.assign({}, todoObj, receivedTodo);
                 todoObj.w_PowerO = '';
                 store['todo'] = JSON.stringify(todoObj);
@@ -702,6 +712,10 @@ const srv = http.createServer((req, res) => {
                     if (receivedTodo.DeviceId) fileCfg.deviceId = receivedTodo.DeviceId;
                     fs.writeFileSync(path.resolve(__dirname, configFile), JSON.stringify(fileCfg, null, 2));
                 } catch (_) {}
+
+                if (!joined && !isStandby) {
+                    scheduleReconnect();
+                }
             }
 
             enterStandbyMode(receivedTodo ? 'PC böngésző aktív (Session szinkronizálva)' : 'PC / böngésző heartbeat érkezett');
@@ -750,6 +764,16 @@ const srv = http.createServer((req, res) => {
     if (url.pathname === '/api/logs') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ logs: liveLogs }));
+    }
+
+    if (url.pathname === '/api/debug') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+            todoObj: todoObj,
+            joined: joined,
+            isStandby: isStandby,
+            standbyEnabled: standbyEnabled
+        }, null, 2));
     }
 
     // Default HTML Dashboard
