@@ -167,46 +167,40 @@ const userDeliveryState = new Map();
 const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
 const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
 
-// TIER 1 (Elsődleges / Fő): Privát üzenet a közös chatfolyamban (lakat ikonnal, nem nyit fület)
-function sendTier1PM(senderId, nick) {
-    addLog(`[TIER 1 - KÖZÖS CHAT LAKAT] Küldés ${nick} (${senderId}) részére (közös chatfolyam, lakat)...`);
+// TIER 1 & 2: Privát csevegő fül ÉS közös chatfolyamban lakat (<priv>)
+function sendPrivateBoth(senderId, nick) {
+    addLog(`[PRIVÁT KÜLDÉS] Privát csevegő fül ÉS közös chat lakat küldése ${nick} (${senderId}) részére...`);
     userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
 
-    // Standard PM whisper on main room
-    sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
-
-    // WASM native dispatch (renders directly as <priv> on common chat)
-    try {
-        SendC('xatCommand', '', JSON.stringify({
-            Command: 'Action',
-            Message: PM_REPLY_TEXT,
-            Next: 'messages',
-            Page: 'actions',
-            Type: 'Action',
-            UserNo: parseInt(senderId, 10),
-            name: 'PrivateMessage'
-        }));
-    } catch (_) {}
-}
-
-// TIER 2 (Fallback 1): Privát chat fül (ha a fő chaten a lakat le van zárva)
-function sendTier2PC(senderId, nick) {
-    addLog(`[TIER 2 - PRIVÁT FÜL] Fő chaten a lakat lezárva, külön privát fül nyitása és küldés: ${nick} (${senderId})...`);
-    userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
-
-    // 1. Open PC tab on target client
+    // 1. Privát csevegő fül (PC tab) megnyitása
     sendPacket(`<z d="${senderId}" t="/" />`);
 
     setTimeout(() => {
-        // 2. Send inside PC tab
+        // 2. Üzenet a privát csevegő fülbe
         sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
         sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
+
+        // 3. Üzenet a közös chatfolyamba lakat ikonnal (<priv>)
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
+
+        // 4. WASM native PrivateMessage dispatch (közös chat <priv>)
+        try {
+            SendC('xatCommand', '', JSON.stringify({
+                Command: 'Action',
+                Message: PM_REPLY_TEXT,
+                Next: 'messages',
+                Page: 'actions',
+                Type: 'Action',
+                UserNo: parseInt(senderId, 10),
+                name: 'PrivateMessage'
+            }));
+        } catch (_) {}
     }, 200);
 }
 
-// TIER 3 (Fallback 2): Fő chaten nyilvánosan ahol mindenki látja (ha mindkettő privát le van zárva)
+// TIER 3 (Fallback): Fő chaten nyilvánosan ahol mindenki látja (ha a privát le van zárva)
 function sendTier3Public(senderId, nick) {
-    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Mindkét privát zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
+    addLog(`[TIER 3 - FŐ CHAT NYILVÁNOS] Privát zárolva, nyilvános kiírás a fő chaten @${nick} részére...`);
     userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
 
     SendC('xatCommand', '', JSON.stringify({
@@ -236,21 +230,15 @@ function handleUserInteraction(senderId, text, isClick, isPCTab) {
 
     addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, isPCTab=${isPCTab}, text="${text}").`);
 
-    // If user already chats inside a PC tab, reply inside PC tab (Tier 2)
-    if (isPCTab) {
-        sendTier2PC(senderId, targetNick);
-        return;
-    }
-
-    // If known to have friend-only PM lock from flags, start directly with Tier 2
+    // If known to have friend-only PM lock completely blocking private, fallback to room chat
     if (userObj && userObj.isFriendOnly) {
-        addLog(`[LAKAT ZÁROLVA] ${targetNick} közös chat lakat zárolva, Tier 2 (privát fül) indítása...`);
-        sendTier2PC(senderId, targetNick);
+        addLog(`[ZÁROLT PRIVÁT] ${targetNick} zárolt profil, közös nyilvános chatre válaszolunk...`);
+        sendTier3Public(senderId, targetNick);
         return;
     }
 
-    // FŐ ALAPÉRTELMEZETT: Tier 1 (Közös chatfolyamban lakat ikonnal, nem nyit fület)
-    sendTier1PM(senderId, targetNick);
+    // Küldés mindkét privát csatornára (privát csevegő fül + közös chat lakat)
+    sendPrivateBoth(senderId, targetNick);
 }
 
 let activeWs = null;
@@ -421,20 +409,10 @@ function handleJson(raw) {
                                     str.includes('blocked');
 
                 if (isRejection && lastTargetId) {
-                    const currentState = userDeliveryState.get(lastTargetId) || { nick: lastTargetNick, tier: 1 };
-                    addLog(`[SZERVER ELUTASÍTÁS - TIER ${currentState.tier} ZÁROLVA]: Target: ${currentState.nick} (${lastTargetId})`);
-
-                    if (currentState.tier === 1) {
-                        // Tier 1 (fő chat lakat) zárolva -> Lépés Tier 2-re (Privát chat fül)
-                        setTimeout(() => {
-                            sendTier2PC(lastTargetId, currentState.nick);
-                        }, 300);
-                    } else if (currentState.tier === 2) {
-                        // Tier 2 (privát fül) is zárolva -> Lépés Tier 3-ra (Fő chaten nyilvánosan, ahol mindenki látja)
-                        setTimeout(() => {
-                            sendTier3Public(lastTargetId, currentState.nick);
-                        }, 300);
-                    }
+                    addLog(`[SZERVER ELUTASÍTÁS - PRIVÁT ZÁROLVA]: Target: ${lastTargetNick} (${lastTargetId})`);
+                    setTimeout(() => {
+                        sendTier3Public(lastTargetId, lastTargetNick);
+                    }, 300);
                 }
 
 
