@@ -640,31 +640,26 @@ async function startKeeper() {
         currentActiveRegname = activeRegname;
     }
 
-    // Build the exact 'todo' storage structure matching browser
+    // Build clean storage structure matching xath_guest_runner
     const todoObject = {
-        ...parsedTodo,
         w_userno: activeId,
         w_k1: activeK1,
         w_k2: activeK2,
         w_name: activeNick,
-        w_avatar: activeAvatar,
+        w_avatar: String(activeAvatar),
         w_registered: activeRegname,
-        DeviceId: activeDeviceId,
-        PassHash: activePassHash,
-        w_cb: (parsedTodo && parsedTodo.w_cb) ? parsedTodo.w_cb : '0',
-        MobNo: ''
+        w_userrev: 1
     };
 
-    const powersStr = "2147483647|2147483647|4294836223|4294967295|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2147483647|2080374783|2112880639|1608499199|1069547519|2130702079|2147483647|1802502011|796917759|2130706431|2097146|0";
-    const powersObj = {};
-    powersStr.split("|").forEach((p, i) => { powersObj[i] = parseInt(p, 10); });
-
     const storage = {
+        'mobCookies': '1',
         'todo': JSON.stringify(todoObject),
-        'Macros': JSON.stringify({ Stealth: 'disable' }),
-        'Settings': JSON.stringify({ Stealth: 'disable' }),
-        'w_Mask': JSON.stringify({ "0": 16777216 }),
-        'w_Powers': JSON.stringify(powersObj)
+        'Settings': JSON.stringify({
+            name: activeNick,
+            avatar: String(activeAvatar),
+            home: '',
+            status: ''
+        })
     };
 
     global.localStorage = {
@@ -834,22 +829,9 @@ async function startKeeper() {
             }
             // Type 2: Outbound protocol packet from WASM
             else if (type === 2) {
-                let pkt = data;
-                if (pkt.startsWith('<y ')) {
-                    pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
-                } else if (pkt.startsWith('<j2 ')) {
-                    if (isGuestFallback) {
-                        pkt = pkt.replace(/u="[^"]*"/, `u="${activeId}"`);
-                        if (activeK1) {
-                            pkt = pkt.replace(/k="[^"]*"/, `k="${activeK1}"`);
-                        }
-                        const cleanNick = (BOT_NICK || 'Szaby').replace(/##/g, '').trim();
-                        pkt = pkt.replace(/n="[^"]*"/, `n="${cleanNick}"`);
-                        pkt = pkt.replace(/f="(\d+)"/, (m, fVal) => `f="${(parseInt(fVal, 10) & ~65)}"`);
-                    }
-                    addLog(`[AUTH J2 KÜLDVE]: ${pkt.replace(/\0/g, ' ')}`);
-                }
-                sendPacket(pkt);
+                if (data.includes('Not added you as a friend')) return;
+                addLog(`[KIKÜLDÖTT CSOMAG]: ${data.replace(/\0/g, ' ').slice(0, 80)}`);
+                sendPacket(Buffer.from(data));
             }
         } catch (e) {
             console.error('[HANDLE_JSON ERR]:', e.message);
@@ -889,6 +871,8 @@ async function startKeeper() {
     Module.onRuntimeInitialized = () => {
         SendC('sendStuff', JSON.stringify({ Flags: 6, origin: 'https://xath.hu' }), '');
         SendC('xatInit', '', '');
+        SendC('xatCommand', '', JSON.stringify({ Type: 'Setting', Command: 'Setting', Name: 'name', Value: activeNick }));
+        SendC('xatCommand', '', JSON.stringify({ Type: 'Setting', Command: 'Setting', Name: 'avatar', Value: String(activeAvatar) }));
         SendC('SetPage', '', 'classic');
         SendC('xatMain', '', '');
         SendC('leaveBackground', '', TARGET_ROOM);
