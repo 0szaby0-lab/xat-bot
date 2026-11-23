@@ -109,9 +109,79 @@ let hasUnstealthed = false;
 const seenUsers = new Map();
 const urlCache = {};
 
-// --- HTTP Server for Render Healthcheck & Live Dashboard ---
+// --- Activity Logs & Global Message / Command Dispatchers ---
+const recentLogs = [];
+function addLog(msg) {
+    const time = new Date().toLocaleTimeString();
+    recentLogs.push(`[${time}] ${msg}`);
+    if (recentLogs.length > 40) recentLogs.shift();
+    console.log(msg);
+}
+
+function sendRoomMessage(text) {
+    if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
+        addLog(`[KÜLDÉS SIKERTELEN] WebSocket nincs nyitva (állapot: ${activeWs ? activeWs.readyState : 'null'})`);
+        return false;
+    }
+    const msgOpts = Buffer.from(JSON.stringify({
+        isTranslated: "",
+        msgId: Math.random().toString(36).substr(2, 9),
+        type: "msg"
+    })).toString('base64');
+    const pkt = `<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
+    activeWs.send(Buffer.from(pkt));
+    totalPacketsSent++;
+    addLog(`[ÜZENET KIKÜLDVE] [${BOT_NICK}]: "${text}"`);
+    return true;
+}
+
+function sendRawCommand(cmd) {
+    if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
+        addLog(`[PARANCS SIKERTELEN] WebSocket nincs nyitva`);
+        return false;
+    }
+    // 1. Send pure command packet
+    const purePkt = `<m t="${cmd.replace(/"/g, '&quot;')}" u="${currentActiveId}" />\0`;
+    activeWs.send(Buffer.from(purePkt));
+
+    // 2. Also send wrapped message packet for full client compatibility
+    const msgOpts = Buffer.from(JSON.stringify({
+        isTranslated: "",
+        msgId: Math.random().toString(36).substr(2, 9),
+        type: "msg"
+    })).toString('base64');
+    const fullPkt = `<m t="${cmd.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${currentActiveId}" />\0`;
+    activeWs.send(Buffer.from(fullPkt));
+
+    totalPacketsSent += 2;
+    addLog(`[PARANCS KIKÜLDVE]: "${cmd}"`);
+    return true;
+}
+
+function disableInvisibleMode() {
+    addLog(`[LÁTHATÓSÁG] Invisible power kikapcsolási szekvencia indítása (${TARGET_ROOM})...`);
+    sendRawCommand('/-invisible');
+    sendRawCommand('/u');
+    setTimeout(() => {
+        sendRoomMessage('Sziasztok! Online vagyok :)');
+    }, 1200);
+    return true;
+}
+
+// --- HTTP Server for Render Healthcheck, Live Dashboard & Remote Control ---
 const server = http.createServer((req, res) => {
-    if (req.url === '/health' || req.url === '/ping') {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pathname = parsedUrl.pathname;
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        return res.end();
+    }
+
+    if (pathname === '/health' || pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
             status: isConnected ? 'online' : 'reconnecting',
@@ -124,46 +194,154 @@ const server = http.createServer((req, res) => {
         }));
     }
 
+    if (pathname === '/api/logs') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ logs: recentLogs }));
+    }
+
+    if (pathname === '/api/disable-invisible') {
+        disableInvisibleMode();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: true, message: 'Invisible power kikapcsolási parancs (/-invisible) és szoba üzenet elküldve!' }));
+    }
+
+    if (pathname === '/api/reconnect') {
+        addLog('[TÁVVEZÉRLÉS] Manuális újracsatlakozás kérés érkezett.');
+        cleanupAndReconnect(1000);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: true, message: 'Újracsatlakozás elindítva!' }));
+    }
+
+    if (pathname === '/api/send') {
+        const msg = parsedUrl.searchParams.get('msg');
+        if (msg) {
+            if (msg.startsWith('/')) {
+                sendRawCommand(msg);
+            } else {
+                sendRoomMessage(msg);
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ success: true, sent: msg }));
+        } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ success: false, error: 'Hiányzó msg paraméter' }));
+        }
+    }
+
     const uptimeHrs = ((Date.now() - startTime) / 3600000).toFixed(2);
     const html = `<!DOCTYPE html>
-<html>
+<html lang="hu">
 <head>
     <meta charset="utf-8">
-    <title>xath 24/7 Keeper - ${BOT_NICK}</title>
+    <title>xath 24/7 Vezérlőpult - ${BOT_NICK}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 650px; margin: 0 auto; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-        h1 { color: #58a6ff; font-size: 20px; margin-top: 0; display: flex; align-items: center; gap: 8px; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 16px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; max-width: 680px; margin: 0 auto; padding: 20px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); }
+        h1 { color: #58a6ff; font-size: 22px; margin-top: 0; display: flex; align-items: center; justify-content: space-between; }
+        h2 { font-size: 16px; color: #f0f6fc; margin: 20px 0 10px 0; border-bottom: 1px solid #21262d; padding-bottom: 6px; }
         .badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: bold; }
         .badge-online { background: #238636; color: #fff; }
         .badge-offline { background: #da3633; color: #fff; }
-        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-        td { padding: 10px 0; border-bottom: 1px solid #21262d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+        td { padding: 8px 0; border-bottom: 1px solid #21262d; }
         td:first-child { color: #8b949e; width: 40%; }
+        .btn-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+        button, .btn { font-size: 13px; font-weight: 600; padding: 10px 14px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; transition: 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-danger { background: #da3633; color: #fff; border-color: #f85149; }
+        .btn-danger:hover { background: #b62324; }
+        .btn-primary { background: #1f6feb; color: #fff; border-color: #388bfd; }
+        .btn-primary:hover { background: #388bfd; }
+        .btn-success { background: #238636; color: #fff; border-color: #2ea043; }
+        .btn-success:hover { background: #2ea043; }
+        .btn-secondary { background: #21262d; color: #c9d1d9; border-color: #30363d; }
+        .btn-secondary:hover { background: #30363d; }
+        .input-row { display: flex; gap: 8px; }
+        input[type="text"] { flex: 1; padding: 10px 12px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #fff; font-size: 14px; outline: none; }
+        input[type="text"]:focus { border-color: #58a6ff; }
+        #toast { min-height: 22px; margin-top: 10px; font-size: 13px; font-weight: 600; color: #58a6ff; }
+        #logBox { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; height: 170px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; color: #8b949e; white-space: pre-wrap; word-break: break-all; }
         .footer { margin-top: 20px; font-size: 12px; color: #8b949e; text-align: center; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>xath 24/7 Keeper Status</h1>
-        <div>Status: <span class="badge ${isConnected ? 'badge-online' : 'badge-offline'}">${isConnected ? 'ONLINE 24/7' : 'RECONNECTING'}</span></div>
+        <h1>
+            <span>xath 24/7 Vezérlőpult</span>
+            <span class="badge ${isConnected ? 'badge-online' : 'badge-offline'}">${isConnected ? 'ONLINE 24/7' : 'ÚJRACSATLAKOZÁS'}</span>
+        </h1>
+
         <table>
-            <tr><td>Target Room</td><td><a href="https://xath.hu/${TARGET_ROOM}" target="_blank" style="color:#58a6ff;">https://xath.hu/${TARGET_ROOM}</a></td></tr>
-            <tr><td>Nickname</td><td><b>${BOT_NICK}</b></td></tr>
-            <tr><td>Registered Name</td><td>${currentActiveRegname || '<i>None</i>'}</td></tr>
-            <tr><td>User ID</td><td><code>${currentActiveId}</code></td></tr>
-            <tr><td>Uptime</td><td>${uptimeHrs} hours</td></tr>
-            <tr><td>Last Connected</td><td>${lastConnectedTime ? new Date(lastConnectedTime).toLocaleTimeString() : 'Connecting...'}</td></tr>
-            <tr><td>Total Reconnects</td><td>${reconnectAttempts}</td></tr>
-            <tr><td>Packets In / Out</td><td>${totalPacketsReceived} / ${totalPacketsSent}</td></tr>
+            <tr><td>Célszoba</td><td><a href="https://xath.hu/${TARGET_ROOM}" target="_blank" style="color:#58a6ff; text-decoration:none;"><b>${TARGET_ROOM}</b> (https://xath.hu/${TARGET_ROOM})</a></td></tr>
+            <tr><td>Bot Becenév</td><td><b>${BOT_NICK}</b></td></tr>
+            <tr><td>Regisztrált Név</td><td><b>${currentActiveRegname || '<i>Nincs</i>'}</b></td></tr>
+            <tr><td>Felhasználói ID</td><td><code>${currentActiveId}</code></td></tr>
+            <tr><td>Futási idő (Uptime)</td><td>${uptimeHrs} óra</td></tr>
+            <tr><td>Csomagok (Ki / Be)</td><td>${totalPacketsSent} / ${totalPacketsReceived}</td></tr>
         </table>
-        <div class="footer">xath.hu 24/7 Daemon &bull; Antigravity Engine</div>
+
+        <h2>🎮 Power & Láthatóság Távvezérlés</h2>
+        <div class="btn-grid">
+            <button class="btn btn-danger" onclick="triggerAction('/api/disable-invisible', 'Invisible power kikapcsolva!')">🔴 Invisible Kikapcsolása (/-invisible)</button>
+            <button class="btn btn-primary" onclick="triggerAction('/api/send?msg=%2Fu', '/u parancs elküldve!')">👁️ Láthatóság (/u)</button>
+            <button class="btn btn-success" onclick="triggerAction('/api/send?msg=Sziasztok!%20%3A%29', 'Üdvözlés elküldve!')">💬 Üdvözlés küldése</button>
+            <button class="btn btn-secondary" onclick="triggerAction('/api/reconnect', 'Újracsatlakozás folyamatban...')">🔄 Újracsatlakozás</button>
+        </div>
+
+        <form onsubmit="sendCustomMsg(event)" class="input-row">
+            <input type="text" id="customMsg" placeholder="Írj be parancsot (pl. /-invisible vagy szöveget)..." autocomplete="off">
+            <button type="submit" class="btn btn-primary">Küldés</button>
+        </form>
+        <div id="toast"></div>
+
+        <h2>📜 Élő Esemény & Chat Napló</h2>
+        <div id="logBox">Napló betöltése...</div>
+
+        <div class="footer">xath.hu 24/7 Daemon &bull; Render Cloud &bull; RITMADA</div>
     </div>
+
+    <script>
+        function triggerAction(url, msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = 'Küldés folyamatban...';
+            fetch(url)
+                .then(r => r.json())
+                .then(d => {
+                    toast.innerText = '✅ ' + (msg || d.message || 'Sikeres parancsvégrehajtás!');
+                    refreshLogs();
+                    setTimeout(() => { toast.innerText = ''; }, 4500);
+                })
+                .catch(e => {
+                    toast.innerText = '❌ Hiba: ' + e.message;
+                });
+        }
+
+        function sendCustomMsg(e) {
+            e.preventDefault();
+            const inp = document.getElementById('customMsg');
+            const val = inp.value.trim();
+            if (!val) return;
+            triggerAction('/api/send?msg=' + encodeURIComponent(val), 'Elküldve: ' + val);
+            inp.value = '';
+        }
+
+        function refreshLogs() {
+            fetch('/api/logs').then(r => r.json()).then(d => {
+                const box = document.getElementById('logBox');
+                if (box && d.logs && d.logs.length) {
+                    box.innerText = d.logs.join('\\n');
+                    box.scrollTop = box.scrollHeight;
+                }
+            }).catch(() => {});
+        }
+        setInterval(refreshLogs, 2500);
+        refreshLogs();
+    </script>
 </body>
 </html>`;
 
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
 });
 
@@ -457,17 +635,24 @@ async function startKeeper() {
                         }
                     }
 
-                    // Welcome message / joined
+                    // Welcome message / joined room
                     if ((str.includes('<done') || str.includes('<i ')) && !hasUnstealthed) {
                         hasUnstealthed = true;
-                        // Explicitly disable invisible power so the bot is visible in the room
-                        activeWs.send(Buffer.from('<m t="/u" u="0" />\0'));
-                        console.log('[VISIBILITY] Disabled invisible mode (/u sent). User is now visible in the room.');
+                        disableInvisibleMode();
 
                         if (GREETING_MSG) {
                             setTimeout(() => {
                                 sendRoomMessage(GREETING_MSG);
-                            }, 1200);
+                            }, 2500);
+                        }
+                    }
+
+                    // Log incoming room chat
+                    if (str.includes('<m ')) {
+                        const tMatch = str.match(/t="([^"]+)"/);
+                        const uMatch = str.match(/u="([^"_]+)/);
+                        if (tMatch && tMatch[1] && !tMatch[1].startsWith('/')) {
+                            addLog(`[SZOBACSAT]: ${uMatch ? uMatch[1] : 'tag'}: ${tMatch[1]}`);
                         }
                     }
 
@@ -513,18 +698,6 @@ async function startKeeper() {
         }
     }
 
-    function sendRoomMessage(text) {
-        if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return;
-        const msgOpts = Buffer.from(JSON.stringify({
-            isTranslated: "",
-            msgId: Math.random().toString(36).substr(2, 9),
-            type: "msg"
-        })).toString('base64');
-        const pkt = `<m t="${text.replace(/"/g, '&quot;')}" o="${msgOpts}" u="${activeId}" />\0`;
-        activeWs.send(Buffer.from(pkt));
-        totalPacketsSent++;
-        console.log(`[MSG SENT] [${BOT_NICK}]: "${text}"`);
-    }
 
     function handleIncomingPrivateMessage(rawPkt, myId) {
         const uMatch = rawPkt.match(/u="([^"_]+)/);
