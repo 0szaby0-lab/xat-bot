@@ -163,24 +163,55 @@ const lastInteraction = new Map();
 let lastTargetNick = '';
 
 const PM_REPLY_TEXT = "Hey there! Thanks for reaching out, enjoy the music on xmradio! :)";
-const ROOM_GREETING_TEXT = (nick) => `@${nick} Hey! Thanks for reaching out, welcome and enjoy the music on xmradio! (cool)`;
+const ROOM_FALLBACK_TEXT = (nick) => `@${nick} Hey! Your private messages are locked, but welcome and enjoy the music on xmradio! (cool)`;
 
-function triggerRoomGreeting(nick) {
+function triggerRoomFallback(nick) {
     if (!nick) return;
-    addLog(`[CHAT MESSAGE] Greeting @${nick} in main room...`);
+    addLog(`[FALLBACK CHAT] Messaging @${nick} in main room...`);
     SendC('xatCommand', '', JSON.stringify({
         Type: 'Send',
         Command: 'Send',
         Page: 'messages',
-        Message: ROOM_GREETING_TEXT(nick),
+        Message: ROOM_FALLBACK_TEXT(nick),
         msgId: Math.random().toString(36).substr(2, 9)
     }));
 }
 
+function sendPrivateReply(senderId) {
+    addLog(`[PRIVÁT KÜLDÉS] Privát válasz küldése: ${senderId}`);
+
+    // 1. Open PC Tab on target client
+    sendPacket(`<z d="${senderId}" t="/" />`);
+
+    setTimeout(() => {
+        // 2. Private Chat (PC) tab text message
+        sendPacket(`<z d="${senderId}" t="${PM_REPLY_TEXT}" />`);
+
+        // 3. PC tab message format (s="2")
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
+
+        // 4. Standard PM whisper
+        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
+
+        // 5. WASM native PrivateMessage dispatch
+        try {
+            SendC('xatCommand', '', JSON.stringify({
+                Command: 'Action',
+                Message: PM_REPLY_TEXT,
+                Next: 'messages',
+                Page: 'actions',
+                Type: 'Action',
+                UserNo: parseInt(senderId, 10),
+                name: 'PrivateMessage'
+            }));
+        } catch (_) {}
+    }, 250);
+}
+
 function handleUserInteraction(senderId, text, isClick) {
     const now = Date.now();
-    // 15 seconds debounce per user
-    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 15000)) {
+    // 5 seconds debounce per user
+    if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < 5000)) {
         return;
     }
     lastInteraction.set(senderId, now);
@@ -192,19 +223,17 @@ function handleUserInteraction(senderId, text, isClick) {
     }
     lastTargetNick = targetNick;
 
-    addLog(`[INTERACTION] User ${targetNick} (${senderId}) clicked or messaged Szaby.`);
+    addLog(`[INTERACTION] User ${targetNick} (${senderId}) interacted (click=${isClick}, text="${text}").`);
 
-    // 1. Post public tag in main chat room so the user sees it immediately on screen
-    setTimeout(() => {
-        triggerRoomGreeting(targetNick);
-    }, 500);
+    // If target has friend-only lock, fallback to room chat
+    if (userObj && userObj.isFriendOnly) {
+        addLog(`[ZÁROLT PRIVÁT] ${targetNick} barát-záras, közös chatre válaszolunk...`);
+        setTimeout(() => triggerRoomFallback(targetNick), 400);
+        return;
+    }
 
-    // 2. Open PC Tab and send in private as well
-    sendPacket(`<z d="${senderId}" t="/" />`);
-    setTimeout(() => {
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" s="2" />`);
-        sendPacket(`<p u="${senderId}" t="${PM_REPLY_TEXT}" />`);
-    }, 400);
+    // Default: EXCLUSIVELY PRIVATE CHAT (PC tab + PM)
+    sendPrivateReply(senderId);
 }
 
 let activeWs = null;
@@ -353,19 +382,21 @@ function handleJson(raw) {
                         const tMatch = pkt.match(/\bt="([^"]*)"/);
                         const text = tMatch ? tMatch[1] : '';
                         let senderId = uMatch ? uMatch[1] : null;
+                        if (!senderId && dMatch && dMatch[1] !== botId && dMatch[1] !== myServerId) {
+                            senderId = dMatch[1];
+                        }
+                        const isForMe = !dMatch || dMatch[1] === botId || dMatch[1] === myServerId;
 
-                        if (dMatch && (dMatch[1] === botId || dMatch[1] === myServerId)) {
-                            if (senderId && senderId !== botId && senderId !== myServerId && senderId !== '0' && senderId !== '1' && senderId !== '10101' && senderId !== '30303') {
-                                handleUserInteraction(senderId, text, pkt.includes('t="/l"'));
-                            }
+                        if (isForMe && senderId && senderId !== botId && senderId !== myServerId && senderId !== '0' && senderId !== '1' && senderId !== '10101' && senderId !== '30303') {
+                            handleUserInteraction(senderId, text, pkt.includes('t="/l"'));
                         }
                     }
                 }
 
                 // Handle server rejection when recipient has PM locked (friend-only)
-                if (str.includes('Not added you as a friend') || str.includes('only accepts private messages from friends')) {
+                if (str.includes('Not added you as a friend') || str.includes('only accepts private messages from friends') || str.includes('cannot send private message')) {
                     if (lastTargetNick) {
-                        triggerRoomGreeting(lastTargetNick);
+                        triggerRoomFallback(lastTargetNick);
                     }
                 }
 
