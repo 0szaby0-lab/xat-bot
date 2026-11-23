@@ -1,0 +1,19 @@
+{
+  "name": "xat-bot-swarm",
+  "version": "1.0.0",
+  "description": "xat.com Multi-Guest Swarm Engine with WASM Core and Proxy Support",
+  "main": "xat_swarm.js",
+  "scripts": {
+    "start": "node xath_24_7_keeper.js",
+    "keeper": "node xath_24_7_keeper.js",
+    "swarm": "node xath_swarm.js",
+    "harvest": "node auto_harvester.js --max-clean 50 --auto-start"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "https-proxy-agent": "^7.0.6",
+    "socks-proxy-agent": "^8.0.5"
+  },
+  "author": "RITMADA",
+  "license": "ISC"
+}
