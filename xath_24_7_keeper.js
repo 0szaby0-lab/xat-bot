@@ -643,13 +643,7 @@ function handleJson(raw) {
                 addLog(`[WS CLOSED] Code: ${code}, Reason: ${reasonStr}`);
                 SendC('xatMessageReceived', '#CONNECT_CLOSE', '');
                 joined = false;
-
-                if (standbyEnabled && (code === 1008 || code === 4000 || reasonStr.toLowerCase().includes('dup'))) {
-                    enterStandbyMode(`Zárási kód: ${code} (${reasonStr || 'duplicate'})`);
-                } else {
-                    addLog('[AUTO-REBOOT] Tiszta újraindulás a folyamatos 24/7 online jelenléthez...');
-                    setTimeout(() => process.exit(0), 1000);
-                }
+                scheduleReconnect();
             });
 
             activeWs.onerror = (err) => {
@@ -726,10 +720,15 @@ const srv = http.createServer((req, res) => {
     }
 
     if (url.pathname === '/force-reconnect') {
-        addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése -> Tiszta újraindítás...');
+        addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése...');
+        isStandby = false;
+        joined = false;
+        if (activeWs) {
+            try { activeWs.close(1000, 'Manual reconnect'); } catch (_) {}
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'restarting', ok: true }));
-        setTimeout(() => process.exit(0), 400);
+        res.end(JSON.stringify({ status: 'reconnecting', ok: true }));
+        scheduleReconnect();
         return;
     }
 
