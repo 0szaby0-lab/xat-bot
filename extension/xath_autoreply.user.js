@@ -1,0 +1,343 @@
+// ==UserScript==
+// @name         xath.hu Auto-Reply on Profile Click
+// @namespace    https://xath.hu/
+// @version      1.0.0
+// @description  Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit
+// @match        *://xath.hu/*
+// @match        *://*.xath.hu/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Betöltjük a mentett beállításokat vagy alapértelmezetteket
+    const STORE_KEY = 'xath_autoreply_cfg';
+    const config = Object.assign({
+        enabled: true,
+        replyText: "Hey there! Thanks for reaching out, enjoy the music! :)",
+        fallbackText: "Hey! Your private messages are locked, but welcome and enjoy the music! (cool)",
+        debounceMs: 5000
+    }, JSON.parse(localStorage.getItem(STORE_KEY) || '{}'));
+
+    function saveConfig() {
+        localStorage.setItem(STORE_KEY, JSON.stringify(config));
+    }
+
+    let activeSocket = null;
+    let myUserId = null;
+    let lastTargetId = '';
+    let lastTargetNick = '';
+    const lastInteraction = new Map();
+    const knownUsers = new Map();
+    const userDeliveryState = new Map();
+
+    // 1. TIER KÜLDÉSI FÜGGVÉNYEK
+
+    // Tier 1: Privát csevegő fül (PC tab) - Elsődleges
+    function sendTier1PCTab(ws, senderId, nick) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        userDeliveryState.set(senderId, { nick, tier: 1, time: Date.now() });
+
+        const msgId = Math.random().toString(36).substr(2, 9);
+        const opts = btoa(JSON.stringify({
+            isTranslated: "",
+            msgId: msgId,
+            type: "msg"
+        }));
+
+        // Fül nyitás és tickle
+        ws.send(`<z d="${senderId}" t="/" />\0`);
+        ws.send(`<z d="${senderId}" t="/l" />\0`);
+
+        setTimeout(() => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            const myId = myUserId || (window.config && window.config.MyId) || '';
+            ws.send(`<z d="${senderId}" u="${myId}_0" t="${config.replyText}" o="${opts}" s="2" />\0`);
+            ws.send(`<z d="${senderId}" u="${myId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
+            ws.send(`<p u="${senderId}" d="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
+            ws.send(`<p u="${senderId}" t="${config.replyText}" o="${opts}" s="2" />\0`);
+        }, 150);
+    }
+
+    // Tier 2: Fő chaten lakat ikonnal (<priv>) - Fallback 1
+    function sendTier2MainPadlock(ws, senderId, nick) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        userDeliveryState.set(senderId, { nick, tier: 2, time: Date.now() });
+        ws.send(`<p u="${senderId}" t="${config.replyText}" />\0`);
+    }
+
+    // Tier 3: Fő chaten nyilvánosan (@Nick) - Fallback 2
+    function sendTier3Public(ws, senderId, nick) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        userDeliveryState.set(senderId, { nick, tier: 3, time: Date.now() });
+        const pubMsg = `@${nick} ${config.fallbackText}`;
+        ws.send(`<m t="${pubMsg}" />\0`);
+    }
+
+    // Interakció kezelése és szigorú prioritási lépcső
+    function handleUserInteraction(ws, senderId, text, isClick, isPCTab) {
+        if (!config.enabled) return;
+
+        const now = Date.now();
+        if (lastInteraction.has(senderId) && (now - lastInteraction.get(senderId) < config.debounceMs)) {
+            return;
+        }
+        lastInteraction.set(senderId, now);
+
+        lastTargetId = senderId;
+        const userObj = knownUsers.get(senderId);
+        let targetNick = userObj ? userObj.cleanNick : `User_${senderId}`;
+        if (!targetNick || targetNick === 'User_' + senderId) targetNick = 'friend';
+        lastTargetNick = targetNick;
+
+        // Ha a profilból eleve ismert, hogy a privát Friends-Only zárolt:
+        if (userObj && userObj.isFriendOnly) {
+            sendTier3Public(ws, senderId, targetNick);
+            return;
+        }
+
+        // Ha a profil no-pc tiltott (csak lakatot enged):
+        if (userObj && userObj.isNoPC) {
+            sendTier2MainPadlock(ws, senderId, targetNick);
+            return;
+        }
+
+        // Fő ág: Kizárólag a privát csevegő fülbe küldünk
+        sendTier1PCTab(ws, senderId, targetNick);
+    }
+
+    // Bejövő szerver csomagok vizsgálata
+    function inspectPacket(str, ws) {
+        if (!str || typeof str !== 'string') return;
+
+        // Saját azonosító kinyerése
+        if (!myUserId) {
+            const vMatch = str.match(/<v [^>]*i="(\d+)"/);
+            if (vMatch) myUserId = vMatch[1];
+            if (!myUserId && window.config && window.config.MyId) {
+                myUserId = String(window.config.MyId);
+            }
+        }
+
+        // Felhasználók és lakat / no-pc státusz nyilvántartása
+        if (str.includes('<u ')) {
+            const uMatches = str.match(/<u [^>]+>/g) || [];
+            for (const uPkt of uMatches) {
+                const uMatch = uPkt.match(/\bu="(\d+)"/);
+                const nMatch = uPkt.match(/\bn="([^"]*)"/);
+                const fMatch = uPkt.match(/\bf="([^"]*)"/);
+                if (uMatch) {
+                    const uid = uMatch[1];
+                    const rawNick = nMatch ? nMatch[1] : '';
+                    const cleanNick = rawNick.replace(/\([^)]*\)/g, '').replace(/_##.*$/, '').trim() || `User_${uid}`;
+                    const flag = fMatch ? parseInt(fMatch[1], 10) : 0;
+                    const isFriendOnly = (flag & 32) !== 0 || uPkt.includes('padlock');
+                    const isNoPC = uPkt.includes('no-pc') || uPkt.includes('nopc');
+                    knownUsers.set(uid, { cleanNick, rawNick, isFriendOnly, isNoPC });
+                }
+            }
+        }
+
+        // Kattintások (<z ... t="/l"/>) és bejövő privát üzenetek
+        if (str.includes('<z ') || str.includes('<p ')) {
+            const pPackets = str.match(/<[pz] [^>]+>/g) || [];
+            for (const pkt of pPackets) {
+                const uMatch = pkt.match(/\bu="(\d+)"/);
+                const dMatch = pkt.match(/\bd="(\d+)"/);
+                const tMatch = pkt.match(/\bt="([^"]*)"/);
+                const text = tMatch ? tMatch[1] : '';
+                let senderId = uMatch ? uMatch[1] : null;
+
+                const myId = myUserId || (window.config && String(window.config.MyId));
+                if (!senderId && dMatch && dMatch[1] !== myId) {
+                    senderId = dMatch[1];
+                }
+                const isForMe = !dMatch || dMatch[1] === myId;
+
+                if (isForMe && senderId && senderId !== myId && senderId !== '0' && senderId !== '1') {
+                    const isClick = pkt.includes('t="/l"');
+                    const isPCTab = pkt.includes('s="2"') || (pkt.startsWith('<z ') && !isClick);
+                    handleUserInteraction(ws, senderId, text, isClick, isPCTab);
+                }
+            }
+        }
+
+        // Szerver általi elutasítás észlelése -> Eszkaláció
+        const isFriendOnlyRejection = str.includes('Not added you as a friend') ||
+                                      str.includes('only accepts private messages from friends');
+
+        const isPcRejection = str.includes('does not accept private chats') ||
+                              str.includes('cannot private chat') ||
+                              str.includes('has private chat disabled') ||
+                              str.includes('nopc') ||
+                              str.includes('only accepts private messages') ||
+                              str.includes('Not accepting private chat');
+
+        const isGeneralRejection = isFriendOnlyRejection ||
+                                   str.includes('cannot send private message') ||
+                                   str.includes('does not accept private') ||
+                                   str.includes('cannot private message') ||
+                                   str.includes('blocked');
+
+        if ((isGeneralRejection || isPcRejection) && lastTargetId) {
+            const currentState = userDeliveryState.get(lastTargetId);
+            const targetNick = lastTargetNick || (currentState ? currentState.nick : `User_${lastTargetId}`);
+
+            if (isFriendOnlyRejection) {
+                // Friends-only: Ugrás közvetlenül Tier 3-ra (fő chat nyilvános)
+                setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
+            } else if (currentState && currentState.tier === 1) {
+                // Tier 1 elutasítva -> Tier 2 (fő chat lakat)
+                setTimeout(() => sendTier2MainPadlock(ws, lastTargetId, targetNick), 250);
+            } else if (currentState && currentState.tier === 2) {
+                // Tier 2 is elutasítva -> Tier 3 (fő chat nyilvános)
+                setTimeout(() => sendTier3Public(ws, lastTargetId, targetNick), 250);
+            }
+        }
+    }
+
+    // 2. WEBSOCKET ELFOGÁS
+    const OrigWebSocket = window.WebSocket;
+    window.WebSocket = function (...args) {
+        const ws = new OrigWebSocket(...args);
+        activeSocket = ws;
+
+        ws.addEventListener('message', (ev) => {
+            if (typeof ev.data === 'string') {
+                inspectPacket(ev.data, ws);
+            } else if (ev.data instanceof ArrayBuffer) {
+                const text = new TextDecoder().decode(ev.data);
+                inspectPacket(text, ws);
+            } else if (ev.data instanceof Blob) {
+                const reader = new FileReader();
+                reader.onload = () => inspectPacket(reader.result, ws);
+                reader.readAsText(ev.data);
+            }
+        });
+
+        ws.addEventListener('close', () => {
+            if (activeSocket === ws) activeSocket = null;
+        });
+
+        return ws;
+    };
+    window.WebSocket.prototype = OrigWebSocket.prototype;
+
+    // 3. LEBEGŐ FELHASZNÁLÓI FELÜLET (UI GOMB & BEÁLLÍTÁSOK)
+    function injectUI() {
+        if (document.getElementById('xath-autoreply-widget')) return;
+
+        const container = document.createElement('div');
+        container.id = 'xath-autoreply-widget';
+        container.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 13px;
+        `;
+
+        const btn = document.createElement('button');
+        btn.id = 'xath-autoreply-btn';
+        function updateBtn() {
+            btn.innerHTML = `⚡ Auto-Reply: <b>${config.enabled ? 'BE' : 'KI'}</b>`;
+            btn.style.background = config.enabled ? '#238636' : '#6e7681';
+        }
+        btn.style.cssText = `
+            color: #fff;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 20px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        `;
+        updateBtn();
+
+        // Kattintásra ki/be kapcsolás, dupla kattintásra beállítások ablak
+        btn.onclick = () => {
+            config.enabled = !config.enabled;
+            saveConfig();
+            updateBtn();
+        };
+
+        const settingsBtn = document.createElement('span');
+        settingsBtn.innerHTML = '⚙️';
+        settingsBtn.style.cursor = 'pointer';
+        settingsBtn.style.marginLeft = '4px';
+        settingsBtn.title = 'Üzenet szerkesztése';
+        settingsBtn.onclick = (e) => {
+            e.stopPropagation();
+            openModal();
+        };
+        btn.appendChild(settingsBtn);
+
+        container.appendChild(btn);
+        document.body.appendChild(container);
+    }
+
+    function openModal() {
+        if (document.getElementById('xath-autoreply-modal')) return;
+
+        const modal = document.createElement('div');
+        modal.id = 'xath-autoreply-modal';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.6);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 1000000;
+            font-family: sans-serif;
+        `;
+
+        const box = document.createElement('div');
+        box.style.cssText = `
+            background: #161b22;
+            color: #c9d1d9;
+            padding: 20px;
+            border-radius: 10px;
+            width: 360px;
+            max-width: 90vw;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            border: 1px solid #30363d;
+        `;
+
+        box.innerHTML = `
+            <h3 style="margin-top:0; color:#58a6ff;">⚡ xath Auto-Reply Beállítások</h3>
+            <label style="display:block; margin-bottom:6px; font-weight:600;">Privát válasz szövege:</label>
+            <textarea id="ar-text" style="width:100%; height:70px; background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:8px; box-sizing:border-box;">${config.replyText}</textarea>
+            
+            <label style="display:block; margin-top:12px; margin-bottom:6px; font-weight:600;">Nyilvános tartalék szöveg (ha zárolva a privát):</label>
+            <textarea id="ar-fallback" style="width:100%; height:50px; background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:8px; box-sizing:border-box;">${config.fallbackText}</textarea>
+            
+            <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
+                <button id="ar-cancel" style="padding:6px 14px; background:#30363d; color:#fff; border:none; border-radius:6px; cursor:pointer;">Mégse</button>
+                <button id="ar-save" style="padding:6px 14px; background:#238636; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:600;">Mentés</button>
+            </div>
+        `;
+
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+
+        document.getElementById('ar-cancel').onclick = () => modal.remove();
+        document.getElementById('ar-save').onclick = () => {
+            config.replyText = document.getElementById('ar-text').value.trim() || config.replyText;
+            config.fallbackText = document.getElementById('ar-fallback').value.trim() || config.fallbackText;
+            saveConfig();
+            modal.remove();
+        };
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', injectUI);
+    } else {
+        injectUI();
+    }
+})();

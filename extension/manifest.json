@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "xath Auto-Reply on Profile Click",
+  "version": "1.0.0",
+  "description": "Automatikus privát üzenet küldése azonnal, ha valaki rákattint a profilodra vagy privátot nyit xath.hu-n.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "*://xath.hu/*",
+    "*://*.xath.hu/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://xath.hu/*",
+        "*://*.xath.hu/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_title": "xath Auto-Reply"
+  }
+}
