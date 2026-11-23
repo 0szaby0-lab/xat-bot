@@ -617,9 +617,17 @@ function handleJson(raw) {
                 }
 
                 // Duplicate login / kick észlelése
-                if (str.includes('<dup') || str.includes('<logout') || str.includes('t="/k"') || str.includes('<k ') || str.includes('duplicate') || str.includes('another location')) {
+                if (str.includes('<dup') || str.includes('t="/k"') || str.includes('<k ') || str.includes('duplicate') || str.includes('another location')) {
                     addLog('[DUPLICATE SESSION] Belépés történt egy másik eszközről (PC/telefon)! Standby mód bekapcsolása...');
                     enterStandbyMode('Szerver duplikált bejelentkezési kick');
+                } else if (str.includes('<logout')) {
+                    addLog(`[SERVER LOGOUT / REJECT] Szerver kijelentkeztetési válasz: ${str.slice(0, 100)}`);
+                    if (str.includes('E43')) {
+                        addLog('[AUTH E43] A munkamenet kulcsok lejártak vagy a fiók jelenleg másik eszközről aktív.');
+                        enterStandbyMode('E43 - Másik eszközön aktív vagy friss session szükséges');
+                    } else {
+                        enterStandbyMode(`Szerver logout (${str.slice(0, 40)})`);
+                    }
                 }
 
                 SendC('xatMessageReceived', '#MESSAGE', buf.toString('base64'));
@@ -666,10 +674,42 @@ const srv = http.createServer((req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-    if (url.pathname === '/user-active') {
-        enterStandbyMode('PC / böngésző heartbeat érkezett');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: true }));
+    if (url.pathname === '/user-active' || url.pathname === '/api/sync-session') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            let receivedTodo = null;
+            if (body) {
+                try {
+                    const parsed = JSON.parse(body);
+                    if (parsed.todo && typeof parsed.todo === 'object') {
+                        receivedTodo = parsed.todo;
+                    } else if (parsed.PassHash && (parsed.w_userno || parsed.DeviceId)) {
+                        receivedTodo = parsed;
+                    }
+                } catch (_) {}
+            }
+
+            if (receivedTodo) {
+                addLog(`[SESSION SYNC] Új hitelesítési munkamenet érkezett a böngészőből (User: ${receivedTodo.w_name || receivedTodo.w_userno || botNick})!`);
+                todoObj = Object.assign({}, todoObj, receivedTodo);
+                todoObj.w_PowerO = '';
+                store['todo'] = JSON.stringify(todoObj);
+                try {
+                    fileCfg.todo = todoObj;
+                    if (receivedTodo.w_k1) fileCfg.k1 = receivedTodo.w_k1;
+                    if (receivedTodo.w_k2) fileCfg.k2 = receivedTodo.w_k2;
+                    if (receivedTodo.PassHash) fileCfg.passHash = receivedTodo.PassHash;
+                    if (receivedTodo.DeviceId) fileCfg.deviceId = receivedTodo.DeviceId;
+                    fs.writeFileSync(path.resolve(__dirname, configFile), JSON.stringify(fileCfg, null, 2));
+                } catch (_) {}
+            }
+
+            enterStandbyMode(receivedTodo ? 'PC böngésző aktív (Session szinkronizálva)' : 'PC / böngésző heartbeat érkezett');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ status: 'standby', ok: true, isStandby: true, synced: !!receivedTodo }));
+        });
+        return;
     }
 
     if (url.pathname === '/user-inactive') {
@@ -682,9 +722,17 @@ const srv = http.createServer((req, res) => {
 
     if (url.pathname === '/force-reconnect') {
         addLog('[MANUÁLIS PARANCS] Kézi újracsatlakozás kérése...');
-        exitStandbyMode('Manuális Force Reconnect');
+        isStandby = false;
+        standbyCooldownUntil = 0;
+        lastUserHeartbeat = 0;
+        if (standbyWatcherTimer) {
+            clearInterval(standbyWatcherTimer);
+            standbyWatcherTimer = null;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ status: 'reconnecting', ok: true }));
+        res.end(JSON.stringify({ status: 'reconnecting', ok: true }));
+        scheduleReconnect();
+        return;
     }
 
     if (url.pathname === '/health' || url.pathname === '/ping') {

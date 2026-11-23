@@ -342,9 +342,15 @@
 
     function sendKeeperHeartbeat() {
         try {
+            const rawTodo = localStorage.getItem('todo');
+            let todoData = null;
+            if (rawTodo) {
+                try { todoData = JSON.parse(rawTodo); } catch (_) {}
+            }
             fetch(`${KEEPER_URL}/user-active?user=Szaby`, {
                 method: 'POST',
-                mode: 'no-cors'
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user: 'Szaby', todo: todoData })
             }).catch(() => {});
         } catch (_) {}
     }
